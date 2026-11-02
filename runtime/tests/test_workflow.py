@@ -242,6 +242,41 @@ async def test_ambient_tracing_is_disabled_inside_adapters_and_restored(monkeypa
     assert attached == []
 
 
+async def test_outer_collect_runs_cannot_collect_graph_and_remains_usable():
+    """A built-in local collector keeps only the caller's explicit outer runs."""
+    langsmith = importlib.import_module("langsmith")
+    tracer_context = importlib.import_module("langchain_core.tracers.context")
+    runnable = importlib.import_module("langchain_core.runnables").RunnableLambda
+
+    async def echo(value):
+        return value
+
+    # collect_runs is itself local. Explicitly disable LangSmith so ambient
+    # environment settings cannot create a telemetry client during this test.
+    with langsmith.tracing_context(enabled=False, parent=False):
+        with tracer_context.collect_runs() as collector:
+            before = runnable(echo, name="outer-before")
+            assert await before.ainvoke({"owner": "before"}) == {"owner": "before"}
+            assert [item.name for item in collector.traced_runs] == ["outer-before"]
+            result = await run(
+                request(),
+                data=DemoData(),
+                content=DemoContent(),
+                planner=DemoPlanner(),
+                trace=MemoryTrace(),
+            )
+            assert result.status == "completed"
+            assert tracer_context.run_collector_var.get() is collector
+            after = runnable(echo, name="outer-after")
+            assert await after.ainvoke({"owner": "after"}) == {"owner": "after"}
+            # Asserting collected payloads proves both input isolation and
+            # restoration of actual collection, beyond ContextVar identity.
+            assert [(item.name, item.inputs) for item in collector.traced_runs] == [
+                ("outer-before", {"owner": "before"}),
+                ("outer-after", {"owner": "after"}),
+            ]
+
+
 @pytest.mark.parametrize("mode", ["no_verifier", "full_agent"])
 async def test_local_action_loop_exceeds_default_graph_recursion_limit(mode):
     """Nine search/plan/execute rounds require more than 25 genuine graph steps."""

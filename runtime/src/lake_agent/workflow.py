@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, TypedDict
 
 from langchain_core.runnables.config import var_child_runnable_config
-from langchain_core.tracers.context import tracing_v2_callback_var
+from langchain_core.tracers.context import run_collector_var, tracing_v2_callback_var
 from langgraph.graph import END, START, StateGraph
 from langsmith import tracing_context
 
@@ -91,18 +91,23 @@ def _local_graph_context() -> Iterator[None]:
 
     In the supported Core version, callback configuration first checks the
     tracing_v2 callback ContextVar, then LangSmith's enabled context/environment.
-    Clearing only the latter would still attach an outer LangChainTracer. Also
-    clear inherited Runnable configuration so outer callbacks/checkpoint options
-    cannot enter this private invocation. Tokens restore the caller's exact
-    values; process environment and concurrent task contexts are never changed.
+    Clearing only the latter would still attach an outer LangChainTracer. Core
+    also injects collect_runs() through a separate run_collector ContextVar even
+    when tracing is disabled; clear that collector so private graph inputs and
+    outputs cannot enter the caller's collection. Clear inherited Runnable
+    configuration so outer callbacks/checkpoint options cannot enter this
+    invocation. Tokens restore the caller's exact values; process environment
+    and concurrent task contexts are never changed.
     """
     tracer_token = tracing_v2_callback_var.set(None)
+    collector_token = run_collector_var.set(None)
     config_token = var_child_runnable_config.set(None)
     try:
         with tracing_context(enabled=False, parent=False):
             yield
     finally:
         var_child_runnable_config.reset(config_token)
+        run_collector_var.reset(collector_token)
         tracing_v2_callback_var.reset(tracer_token)
 
 
