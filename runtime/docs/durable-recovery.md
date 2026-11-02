@@ -83,9 +83,11 @@ runs/
 
 省略 StateStore 的普通运行继续使用 `runs/<run_id>/events.jsonl`。这两种方式的 JSONL 都是审计记录，不能单独用于恢复。
 
+图流程从START开始按已知调用日志重建，没有第二套图checkpointer；迁移机制见[LangGraph流程说明](langgraph-workflow.md)。
+
 ## 恢复前提与执行规则
 
-恢复严格要求相同的运行时版本和实际 Python 源文件摘要；仅保留相同包版本号不足以通过源码校验。继续未终结运行时还要求相同的可信工具契约；复用已保存终态时不重新读取工具清单。工具摘要来自重新校验的 `DataPort.tool_specs()`，包括工具 schema 和可信能力声明。新端口仍须遵守原不可变数据快照的语义；控制器不会将恢复当作跨数据版本迁移。
+恢复严格要求相同的运行时版本、实际 Python 源文件摘要，以及LangGraph、LangChain-Core、checkpoint和LangSmith依赖版本；仅保留相同包版本号不足以通过源码校验。继续未终结运行时还要求相同的可信工具契约；复用已保存终态时不重新读取工具清单。工具摘要来自重新校验的 `DataPort.tool_specs()`，包括工具 schema 和可信能力声明。新端口仍须遵守原不可变数据快照的语义；控制器不会将恢复当作跨数据版本迁移。
 
 控制器按稳定调用 ID 查找历史响应，不按并行 worker 的返回顺序读取。重建时逐项比较 phase 与请求，只规范化随时间变化的 timeout、剩余 wall time，以及经原 snapshot/digest 重新注册确认的内容 handle。请求分叉、未知调用或不兼容记录不会退回一次真实 adapter 调用来“试试看”。
 
@@ -137,6 +139,6 @@ uv run --frozen pytest -q tests/test_state.py tests/test_trace_attempts.py tests
 
 覆盖范围包括真实 SQLite 与跨进程锁、取消等待与资源释放、独立审计尝试、全新端口重建、已知调用不重复派发、预算与原期限保留、辅助目录注册以及未知结果拒绝。离线 fixture 验证控制与持久化行为，不证明真实数据池检索、答案质量或真实模型的恢复联调。
 
-历史安装脚本`scripts/verify_installed_recovery.py`固定使用0.4.0 wheel，并把打包源码与执行脚本时的工作区源码比较；它是0.4.0的历史安装/崩溃专项入口，不能直接作为当前0.6.1版本的验收命令。历史结果与当前工作台验收的版本范围见[验收记录](project-workspace-acceptance-2026-11-02.md)。
+历史安装脚本`scripts/verify_installed_recovery.py`固定使用0.4.0 wheel，并把打包源码与执行脚本时的工作区源码比较；它是0.4.0的历史安装/崩溃专项入口，不能直接作为当前0.7.0版本的验收命令。历史结果与当前工作台验收的版本范围见[验收记录](project-workspace-acceptance-2026-11-02.md)。
 
 此前受控并行的真实规划器验收在后续请求收到 HTTP 403，完整真实模型流程保持未通过；本次恢复功能不能将该历史失败改写为通过。原始结论与报告入口见[历史专项证据](project-workspace-acceptance-2026-11-02.md#历史专项证据)。

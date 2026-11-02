@@ -1,10 +1,12 @@
 # 异构数据池 Agent Harness
 
-当前包为 **0.6.1**，核心[接口契约](../运行控制接口与异步执行契约.md)为 **v0.5**，JSON封套版本为 **1.0**。这是面向通用异构数据池的Python 3.11+异步运行控制框架；LakeQA只是评测载体。整个项目的目标、文档与提案入口见[项目README](../README.md)。
+当前包为 **0.7.0**，核心[接口契约](../运行控制接口与异步执行契约.md)为 **v0.5**，JSON封套版本为 **1.0**。这是面向通用异构数据池的Python 3.11+异步运行控制框架；LakeQA只是评测载体。整个项目的目标、文档与提案入口见[项目README](../README.md)。
 
 ## 安装与启动
 
 环境要求Python 3.11+与uv。网页与SQLite持久恢复依赖POSIX文件锁，支持macOS/Linux/WSL；原生Windows暂不支持。
+
+如果其他项目曾设置旧版LangChain追踪旗标，启动前执行`unset LANGCHAIN_TRACING LANGCHAIN_HANDLER`；当前Core不支持这两项废弃全局配置。现代V2上下文由图局部隔离，本地审计无需LangSmith服务。
 
 从仓库根目录（包含runtime文件夹）执行：
 
@@ -57,6 +59,10 @@ result = await run(
 ```
 
 端口协议见[ports.py](src/lake_agent/ports.py)，严格共享模型见[models.py](src/lake_agent/models.py)。应用负责端口客户端与事件循环生命周期；并发run需要独立trace、唯一run_id，以及可重入或独立的适配器。
+
+## LangGraph流程编排
+
+`workflow.py`使用LangGraph StateGraph组织目录、任务分解、子任务检索/工具循环、答案与核验反馈。`run/resume`和队友端口不变，原控制器继续负责授权、预算、调用与证据。没有额外图重试、缓存或图checkpointer；SQLite调用日志仍是恢复依据，取消时先等待图节点退出。节点和迁移边界见[LangGraph流程说明](docs/langgraph-workflow.md)。
 
 ## 已实现的控制能力
 
@@ -119,11 +125,11 @@ async with JsonPlanner(
 
 `run(..., state_store=store)`可启用SQLite持久状态；后续`resume(run_id, ...)`用原请求与已验证响应重建控制器。每次尝试使用fresh端口和独立审计段；应用最终关闭StateStore。普通无状态run继续可用，JSONL本身不提供恢复能力。
 
-恢复要求相同运行时源码/版本；继续未终结运行还校验可信工具契约，原绝对期限包含停机时间，预算不会重置。历史已知调用不重新派发；存在started但没有有效completed响应的未知调用时，拒绝自动恢复。详细示例、错误码、辅助目录注册与取消语义见[持久恢复接入说明](docs/durable-recovery.md)。
+恢复要求相同运行时源码/版本和图引擎依赖版本；继续未终结运行还校验可信工具契约，原绝对期限包含停机时间，预算不会重置。历史已知调用不重新派发；存在started但没有有效completed响应的未知调用时，拒绝自动恢复。详细示例、错误码、辅助目录注册与取消语义见[持久恢复接入说明](docs/durable-recovery.md)。
 
 ## 验证与实际边界
 
-2026-11-02收尾审核：**427项离线测试通过**，静态检查、构建与源码外安装验证通过。0.6.0实际浏览器验收保留，0.6.1补充取消与Web恢复边界验证。完整范围见[验收记录](docs/project-workspace-acceptance-2026-11-02.md)，包身份与原始检查结果见[安装证据](docs/installed-wheel-web-2026-11-02.json)。历史SIGKILL验证与真实模型403结果集中见该验收记录的「历史专项证据」。
+0.7.0完整离线回归为443项通过（14.46s），构建与源码外全新环境的真实本机HTTP安装验证通过。0.6.0实际浏览器验收保留，当前前端静态文件未改动。完整范围见[验收记录](docs/project-workspace-acceptance-2026-11-02.md)，包身份与原始检查结果见[安装证据](docs/installed-wheel-web-2026-11-02.json)。历史SIGKILL验证与真实模型403结果集中见该验收记录的「历史专项证据」。
 
 在本目录复核当前版本：
 
@@ -137,7 +143,7 @@ uv build
 uv run --frozen python scripts/verify_installed_web.py --report runs/installed-web-check.json
 ```
 
-安装验证默认只从uv缓存安装依赖，缓存不足时可加`--allow-downloads`下载公开依赖；日常复核报告写入runs，避免覆盖归档证据。默认pytest使用本地fixtures和MockTransport，不发外部模型请求。`verify_installed_recovery.py`是硬编码0.4.0 wheel的历史专项，不用于认证当前0.6.1源码；当前恢复回归包含在上述完整测试及Web安装验收中。
+安装验证默认只从uv缓存安装依赖，缓存不足时可加`--allow-downloads`下载公开依赖；日常复核报告写入runs，避免覆盖归档证据。默认pytest使用本地fixtures和MockTransport，不发外部模型请求。`verify_installed_recovery.py`是硬编码0.4.0 wheel的历史专项，不用于认证当前0.7.0源码；当前恢复回归包含在上述完整测试及Web安装验收中。
 
 真实规划器专项脚本仍位于`scripts/live_controller_acceptance.py`、`live_harness_acceptance.py`和`live_parallel_acceptance.py`，它们会调用外部API。`live_controller_acceptance.py`支持覆盖地址和模型；另两个脚本仍带历史专项服务/模型默认值，应先查看各脚本`--help`与源码；优先读取进程环境MODEL_API_KEY，历史服务也支持本机钥匙串凭据。普通使用和本轮文档整理无需运行这些专项。
 

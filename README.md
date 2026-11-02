@@ -6,11 +6,11 @@
 
 ## 当前交付状态
 
-Python 包 **0.6.1**，核心接口契约 **v0.5**，JSON 封套 **1.0**。
+Python 包 **0.7.0**，核心接口契约 **v0.5**，JSON 封套 **1.0**。
 
 | 部分 | 当前状态 |
 |---|---|
-| 运行控制 Harness | 已实现异步控制、工具授权、预算/超时/重试、有界上下文、受控工具并行、证据校验和可选 SQLite 恢复 |
+| 运行控制 Harness | LangGraph负责实际流程节点与分支；已实现异步控制、工具授权、预算/超时/重试、有界上下文、受控工具并行、证据校验和可选 SQLite 恢复 |
 | 项目工作台 | 已实现智能问答、数据来源、任务历史、评估导入四页，支持执行记录、恢复及 JSON/HTML 导出 |
 | 模型规划 | `JsonPlanner` 支持 API 根地址、API key 和模型名，通过异步 Chat Completions 生成计划 |
 | 数据处理与内容模块 | 已定义接口并提供离线示例；队友的真实 DataPort、ContentPort 尚待接入 |
@@ -68,7 +68,7 @@ uv run --extra web --frozen lake-agent-web --data-dir runs/project-workspace
 |---|---|
 | [运行时 README](runtime/README.md) | Python 调用、模型 API 配置、预算、测试与运行限制 |
 | [核心接口契约](运行控制接口与异步执行契约.md) | 所有模块共享字段、样例与错误语义 |
-| [运行控制器](runtime/src/lake_agent/runtime.py)、[工具调度](runtime/src/lake_agent/tool_runtime.py) | 串行控制与受控并行执行 |
+| [LangGraph流程](runtime/docs/langgraph-workflow.md)、[运行控制器](runtime/src/lake_agent/runtime.py)、[工具调度](runtime/src/lake_agent/tool_runtime.py) | 图编排、安全控制与受控并行执行 |
 | [规划器](runtime/src/lake_agent/planner.py) | OpenAI-compatible API 规划与严格结果解析 |
 | [恢复说明](runtime/docs/durable-recovery.md) | SQLite 状态、调用意图、恢复和未知结果边界 |
 | [工作台说明](runtime/docs/project-workspace.md) | 页面操作、模块注册、HTTP 路由、评估格式 |
