@@ -1,9 +1,8 @@
-"""Run isolated tool attempts and select conservative deterministic ready waves.
+"""执行隔离的工具调用尝试，并保守、确定地选择就绪批次。
 
-This module owns no controller state, audit storage, retries or evidence. The
-caller reserves budgets and records intent before invoking a worker, then
-settles its validated response payload through the controller's normal path.
-Only adapter waits overlap; source and shared-resource claims remain explicit.
+本模块不持有控制器状态、审计存储、重试策略或证据。调用方在执行工作任务前预留预算
+并记录意图，再通过控制器的正常流程结算已验证的响应载荷。
+仅适配器等待可以重叠，来源和共享资源占用须显式声明。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from .validation import canonical_json
 
 @dataclass
 class ToolOutcome:
-    """A raw attempt result; exception messages never cross this boundary."""
+    """单次尝试的原始结果；异常消息不跨越此边界传递。"""
 
     kind: Literal["response", "timeout", "invalid_response", "exception"]
     duration_ms: int
@@ -31,7 +30,7 @@ class ToolOutcome:
 
 @dataclass
 class ToolAttempt:
-    """Local call identity and observable dispatch/return state for one attempt."""
+    """一次尝试的本地调用标识，以及可观察的派发和返回状态。"""
 
     request: m.ToolRequest
     deadline: float
@@ -40,7 +39,7 @@ class ToolAttempt:
 
     @property
     def dispatched(self) -> bool:
-        """Intent preparation alone never establishes an adapter dispatch."""
+        """仅准备调用意图，并不能证明已向适配器派发调用。"""
         return self.started_at is not None
 
 
@@ -50,12 +49,11 @@ async def invoke_tool_attempt(
     *,
     max_output_bytes: int,
 ) -> ToolOutcome:
-    """Await one adapter call, propagate cancellation, and validate its reply.
+    """等待一次适配器调用，传播取消，并验证响应。
 
-    Cooperative timeouts cannot force an adapter to finish. A reply returned
-    after suppressed deadline cancellation is therefore rejected explicitly.
-    Every ordinary return stores its outcome; cancellation leaves no invented
-    response or failure for a controller to mistake for a known tool outcome.
+    协作式超时无法强制适配器结束，因此必须显式拒绝适配器吞掉截止时间取消后才返回的
+    响应。每次普通返回都会保存结果；取消时不虚构响应或失败，避免控制器误认为
+    工具结果已经确定。
     """
     loop = asyncio.get_running_loop()
     owner = asyncio.current_task()
@@ -66,14 +64,14 @@ async def invoke_tool_attempt(
 
     try:
         async with asyncio.timeout_at(attempt.deadline):
-            # Keep this assignment adjacent to the adapter await: audit intent
-            # or time spent waiting for a scheduler slot is not a dispatch.
+            # 此赋值须紧邻适配器 await：审计意图或等待调度名额所耗时间
+            # 不等于实际派发。
             attempt.started_at = loop.time()
             raw = await method(attempt.request)
         if loop.time() >= attempt.deadline:
             raise TimeoutError
-        # Adapter-owned models are not trusted validated instances: callers can
-        # bypass Pydantic validation with model_copy(update=...). Rebuild them.
+        # 适配器持有的模型不能直接视为可信的已验证实例：调用方可通过
+        # model_copy(update=...) 绕过 Pydantic 验证，因此须重建模型。
         raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
         if len(canonical_json(raw)) > max_output_bytes:
             raise ValueError("response exceeds max_output_bytes")
@@ -91,9 +89,9 @@ async def invoke_tool_attempt(
     else:
         outcome = ToolOutcome(kind="response", duration_ms=0, response=response)
 
-    # timeout_at removes its own cancellation request on exit. A remaining new
-    # request belongs to the caller, even if an adapter swallowed CancelledError
-    # and returned (or raised a different error). Never turn that into success.
+    # timeout_at 退出时会移除自身的取消请求。剩余新增请求属于
+    # 调用方，即使适配器吞掉 CancelledError 后返回响应或抛出其他
+    # 错误也如此；绝不能将这种情况当作成功。
     if owner is not None and owner.cancelling() > cancellation_requests:
         raise asyncio.CancelledError
     assert attempt.started_at is not None
@@ -108,12 +106,11 @@ def select_ready_wave(
     specs: Mapping[str, m.ToolSpec],
     limit: int,
 ) -> list[m.ToolStep]:
-    """Select a stable, source/resource-disjoint wave from a validated plan.
+    """从已验证的计划中，按稳定顺序选择来源和资源互不冲突的批次。
 
-    Dependencies must have succeeded before this wave; selecting a predecessor
-    does not release its child. Unsafe or source-less entries are global serial
-    barriers, including when unready. Conflicts end selection so later entries
-    cannot overtake the first conflicting ready action.
+    依赖步骤必须在本批次之前成功；选中前驱并不会使后继立即就绪。不支持安全并行或
+    没有来源的条目是全局串行屏障，即使尚未就绪也如此。遇到冲突即停止选择，
+    防止后续条目越过首个发生冲突的就绪操作。
     """
     if limit <= 0:
         return []

@@ -1,4 +1,4 @@
-"""Contract tests for bounded planner context and observation paging."""
+"""有界规划上下文与观测分页的契约测试。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from lake_agent.validation import canonical_json
 
 
 def observation(observation_id: str, subtask_id: str, **updates):
-    """Build a complete planner observation with optional payload overrides."""
+    """构造完整的规划器观测，并允许覆盖指定载荷字段。"""
     return {
         "observation_id": observation_id,
         "call_id": f"call-{observation_id}",

@@ -1,4 +1,4 @@
-"""Boundary tests cover invalid envelopes, JSON values and source authorization metadata."""
+"""覆盖无效封装、JSON 值与数据源授权元数据的边界测试。"""
 
 import urllib.request
 
@@ -132,8 +132,8 @@ def test_wildcard_source_paths_and_json_pointer_escaping():
             },
         },
     )
-    # The registry now detaches trusted capability metadata from adapter-owned
-    # instances, preventing later mutation from changing authorization/safety.
+    # 注册表将可信能力元数据与适配器拥有的实例分离，
+    # 避免实例后续修改改变授权与安全属性。
     registered = validate_tool_specs([tool])["extract"]
     assert registered == tool
     assert registered is not tool

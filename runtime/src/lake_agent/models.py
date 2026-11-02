@@ -1,9 +1,8 @@
-"""Strict JSON boundary models for the asynchronous data-lake runtime.
+"""异构数据池异步运行时使用的严格 JSON 边界模型。
 
-Every public payload is JSON serializable.  Context fields are intentionally
-flattened on requests so adapters can validate plain incoming JSON with one
-``model_validate`` call.  Runtime-dependent checks (authorized sources, budgets
-and snapshot identity) live in validation.py and the controller.
+所有公开载荷均可序列化为 JSON。请求有意将上下文字段展平，使适配器能够通过
+一次 ``model_validate`` 调用校验普通的输入 JSON。依赖运行状态的检查，
+包括数据源授权、预算和快照身份，由 validation.py 和控制器负责。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ T = TypeVar("T")
 
 
 class Model(BaseModel):
-    """Reject unknown fields, coercion and non-finite JSON numbers."""
+    """拒绝未知字段、隐式类型转换以及非有限的 JSON 数值。"""
 
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
@@ -33,7 +32,7 @@ class PromptVersions(Model):
 
 
 class RunConfig(Model):
-    """Editable run limits; defaults are suitable for the offline example."""
+    """可配置的运行限制；默认值适用于离线示例。"""
 
     max_wall_time_ms: PositiveInt = 120_000
     per_call_timeout_ms: PositiveInt = 20_000
@@ -50,12 +49,12 @@ class RunConfig(Model):
     max_catalog_sources: PositiveInt = 2_000
     max_catalog_bytes: PositiveInt = 2_000_000
     fixed_extract_max_chars: PositiveInt = 12_000
-    # These are UTF-8 JSON working-context limits, not provider token limits.
+    # 以下限制按工作上下文的 UTF-8 JSON 字节计算，不是服务商的 token 限制。
     max_planner_context_bytes: Annotated[int, Field(ge=1024)] = 24_000
     planner_preview_bytes: Annotated[int, Field(ge=256)] = 2_000
     max_observation_reads: NonNegativeInt = 8
     max_identical_tool_calls: PositiveInt = 2
-    # The adapter must separately opt tools into concurrency. Old tools remain serial.
+    # 适配器还必须单独声明工具可并发；已有工具默认继续串行执行。
     max_parallel_tool_calls: Annotated[int, Field(ge=1, le=32)] = 4
     max_input_tokens: PositiveInt | None = None
     max_output_tokens: PositiveInt | None = None
@@ -68,7 +67,7 @@ class RunConfig(Model):
 
     @model_validator(mode="after")
     def check_context_limits(self) -> RunConfig:
-        """Leave room for provenance, omission counts and a requested page."""
+        """为来源信息、省略数量和请求读取的页面预留上下文空间。"""
         if self.planner_preview_bytes > self.max_planner_context_bytes // 2:
             raise ValueError("planner_preview_bytes exceeds half the context budget")
         return self
@@ -84,10 +83,10 @@ class RunRequest(Model):
 
 
 class ErrorInfo(Model):
-    """An adapter error; replay and corrected-input planning are separate rights.
+    """适配器错误；重放操作与修正输入后重新规划属于不同权限。
 
-    Only a trusted data adapter may declare an explicitly failed operation safe
-    to correct. Unknown outcomes and runtime validation errors never recover.
+    只有可信数据适配器，才能声明一个已明确失败的操作可安全地修正输入后再执行。
+    结果未知的操作和运行时校验错误均不允许走这条纠错恢复路径。
     """
 
     code: NonEmpty
@@ -97,7 +96,7 @@ class ErrorInfo(Model):
 
 
 class Usage(Model):
-    """Usage for one adapter call; dispatch and measured quantities are explicit."""
+    """记录一次适配器调用的用量，明确区分请求派发次数与实际测得的用量。"""
 
     input_tokens: NonNegativeInt | None = None
     output_tokens: NonNegativeInt | None = None
@@ -107,12 +106,12 @@ class Usage(Model):
 
     @classmethod
     def local(cls) -> Usage:
-        """A local operation is known to have issued zero provider requests."""
+        """为本地操作记录零服务商请求和零 token 用量；费用保持未知。"""
         return cls(input_tokens=0, output_tokens=0, provider_requests=0)
 
 
 class AggregateUsage(Usage):
-    """Run-level totals may include more than one actual provider request."""
+    """运行级别的汇总用量可以包含多个实际服务商请求。"""
 
     provider_requests: NonNegativeInt = 0
 
@@ -162,10 +161,10 @@ class SourceRecord(Model):
 
 
 class ToolSpec(Model):
-    """Trusted capabilities; safe concurrency and safe replay are independent.
+    """可信工具能力声明；并发安全与重放安全相互独立。
 
-    Static resource keys describe adapter-owned shared connections or engines.
-    The planner cannot override these claims in tool arguments or step metadata.
+    静态资源键描述适配器管理的共享连接或引擎。
+    规划器不得通过工具参数或步骤元数据覆盖这些声明。
     """
 
     name: NonEmpty
@@ -434,11 +433,10 @@ class FinishDecision(Model):
 
 
 class ReadObservationDecision(Model):
-    """Request a page from a previously observed result, never a filesystem path.
+    """请求读取已观测结果的一页内容，不能用于请求文件系统路径。
 
-    Pointer syntax is checked by the run-local reader so malformed requests get
-    an explicit invalid_observation_read result without opening any resource.
-    Offsets count Unicode characters in the selected value's canonical JSON.
+    指针语法由运行内的读取器检查；格式错误时会明确返回 invalid_observation_read，
+    且不会打开任何资源。偏移量按所选值的规范 JSON 中的 Unicode 字符计数。
     """
 
     kind: Literal["read_observation"] = "read_observation"
@@ -492,7 +490,7 @@ class RunResult(Model):
 
 
 class TraceEvent(Model):
-    """Small audit record; bulky payloads are written as artifacts first."""
+    """精简的审计记录；大体积载荷须先写入工件。"""
 
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmpty

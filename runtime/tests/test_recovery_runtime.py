@@ -1,9 +1,9 @@
-"""Public acceptance tests for durable execution across fresh adapter instances.
+"""跨全新适配器实例的持久化执行公开验收测试。
 
-The fixtures are local ports, real SQLite storage and real JSONL audit files.
-Event gates interrupt execution after a known response or while an outcome is
-unknown; no test reaches into controller internals or edits checkpoint records.
-Fresh content instances deliberately require their own transient catalog handle.
+测试替身使用本地端口、真实 SQLite 存储与真实 JSONL 审计文件。
+事件关卡在回复已知之后，或调用结果未知期间中断执行；
+测试不访问控制器内部，也不编辑检查点记录。
+全新的内容实例刻意要求使用各自的临时目录句柄。
 """
 
 from __future__ import annotations
@@ -24,14 +24,14 @@ from lake_agent.trace import JsonlTraceSink
 
 
 def recovery_api():
-    """Resolve the proposed public API inside tests, preserving useful RED output."""
+    """在测试内部解析拟定的公开接口，保留有诊断价值的初始失败输出。"""
     runtime = importlib.import_module("lake_agent.runtime")
     state = importlib.import_module("lake_agent.state")
     return runtime.resume, state.SqliteStateStore, state.StateStoreError
 
 
 def request(**config):
-    """A tight data allowance makes repeated catalog/tool dispatches observable."""
+    """使用严格的数据调用额度，使重复的目录或工具派发可被观察。"""
     limits = {"max_data_calls": 2, "max_model_calls": 4, **config}
     return m.RunRequest(
         run_id="recoverable-run",
@@ -42,7 +42,7 @@ def request(**config):
 
 
 class RecordingData(DemoData):
-    """Count real data calls and expose event-driven unknown/parallel outcomes."""
+    """统计真实数据调用，并通过事件暴露结果未知或并行执行状态。"""
 
     def __init__(self, *, hold_tool=False, parallel=False, contract_revision=1):
         super().__init__()
@@ -76,8 +76,8 @@ class RecordingData(DemoData):
         self.entered.set()
         if self.hold_tool:
             await asyncio.Future()
-        # The second source must finish first. This checks recovery of every
-        # buffered raw reply independently of the serial audit-commit order.
+        # 第二个数据源必须先完成，以检查每个已缓冲原始回复都能恢复，
+        # 且不受串行审计提交顺序影响。
         if self.parallel and req.args["source_id"] == "demo-annual":
             await self.quarter_returned.wait()
         reply = await super().invoke(req)
@@ -88,7 +88,7 @@ class RecordingData(DemoData):
 
 
 class RecordingContent(DemoContent):
-    """Use per-instance handles and verify provenance at the final consumer."""
+    """使用每个实例独立的句柄，并在最终消费者处验证来源信息。"""
 
     def __init__(self):
         super().__init__()
@@ -113,8 +113,8 @@ class RecordingContent(DemoContent):
 
     async def compose(self, req):
         self.compositions.append(req)
-        # Compose/verify can also consult a local catalog index. A fresh
-        # instance must have been rebound even when its cached search is skipped.
+        # compose/verify 也可以访问本地目录索引。即使跳过缓存中的搜索，
+        # 也必须已经对新实例执行重新绑定。
         assert self.catalogs, "recovery did not bind the fresh content instance"
         return await super().compose(req)
 
@@ -124,7 +124,7 @@ class RecordingContent(DemoContent):
 
 
 class RecordingPlanner(DemoPlanner):
-    """Report actual model usage and decide from request state, not call history."""
+    """报告实际模型用量，依据请求状态而非调用历史作出决策。"""
 
     def __init__(self, *, two_tools=False):
         self.decompositions = []
@@ -165,7 +165,7 @@ class RecordingPlanner(DemoPlanner):
 
 
 class InterruptingTrace(JsonlTraceSink):
-    """Commit a chosen public event, then cancel or fail the audit continuation."""
+    """提交指定的公开事件，再取消后续审计过程或使其失败。"""
 
     def __init__(self, root, *, event_type="evidence.added", fail=False):
         super().__init__(root)
@@ -185,7 +185,7 @@ class InterruptingTrace(JsonlTraceSink):
 
 
 async def cancel_at_gate(task, entered):
-    """Always drain the owner task, including when a broken implementation hangs."""
+    """始终等待所有者任务结束，包括缺陷实现发生挂起时。"""
     gate = asyncio.create_task(entered.wait())
     try:
         done, _ = await asyncio.wait({task, gate}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
@@ -202,8 +202,8 @@ async def cancel_at_gate(task, entered):
             await gate
         if not task.done():
             task.cancel()
-        # Retrieve an exception even if execution failed before the event gate.
-        # The original failure from the try block remains the useful diagnosis.
+        # 即使执行在抵达事件关卡前失败，也要获取其异常。
+        # try 块中的原始故障仍是有用的诊断信息。
         with suppress(asyncio.CancelledError, Exception):
             await task
 
@@ -213,7 +213,7 @@ def trace_events(path):
 
 
 def assert_no_port_calls(data, content, planner):
-    """Metadata discovery is local; no async adapter method may run on refusal."""
+    """元数据发现属于本地操作；拒绝恢复时不得运行任何异步适配器方法。"""
     assert data.catalog_requests == data.tool_requests == []
     assert content.preparations == content.searches == content.compositions == []
     assert content.verifications == []
@@ -222,7 +222,7 @@ def assert_no_port_calls(data, content, planner):
 
 @pytest.mark.parametrize("event_type", ["tool.observed", "evidence.added"])
 async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, event_type):
-    """Losing controller memory must not repeat a successful external tool call."""
+    """控制器内存丢失后，不能重复已经成功的外部工具调用。"""
     resume, Store, _ = recovery_api()
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     old_data, old_content, old_planner = RecordingData(), RecordingContent(), RecordingPlanner()
@@ -269,8 +269,8 @@ async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, ev
     assert data.catalog_requests == data.tool_requests == []
     assert planner.decompositions == []
     assert len(planner.selections) == 1
-    assert len(content.preparations) == 1  # Explicit local transient-handle rebind.
-    assert len(content.searches) == 1  # The normal post-tool search is a new frontier.
+    assert len(content.preparations) == 1  # 显式重新绑定本地临时句柄。
+    assert len(content.searches) == 1  # 常规的工具调用后搜索属于新的执行前沿。
     assert content.searches[0].catalog_handle in content.catalogs
     assert len(content.compositions) == len(content.verifications) == 1
     assert (result.call_counts.catalog, result.call_counts.tools, result.call_counts.steps) == (
@@ -279,7 +279,7 @@ async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, ev
         1,
     )
     assert (result.call_counts.planner, result.call_counts.model_calls) == (3, 3)
-    assert result.call_counts.content == 6  # Five original calls plus the rebind.
+    assert result.call_counts.content == 6  # 原始五次调用，加上一次重新绑定。
     assert (result.usage.input_tokens, result.usage.output_tokens) == (21, 9)
     evidence = content.compositions[0].evidence
     assert len(evidence) == 1
@@ -320,7 +320,7 @@ async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, ev
 
 
 async def test_resume_refuses_unknown_tool_outcome_even_when_idempotent(tmp_path):
-    """Idempotence permits normal retries but cannot resolve a lost call outcome."""
+    """幂等性允许正常重试，但无法判定已丢失的调用结果。"""
     resume, Store, StateStoreError = recovery_api()
     store = Store(tmp_path / "state.db")
     first = RecordingData(hold_tool=True)
@@ -354,7 +354,7 @@ async def test_resume_refuses_unknown_tool_outcome_even_when_idempotent(tmp_path
 
 @pytest.mark.parametrize("data_limit", [1, 2])
 async def test_resume_returns_stored_terminal_result_without_calls(tmp_path, data_limit):
-    """Both successful and normally budget-stopped runs are terminal snapshots."""
+    """成功运行与正常因预算停止的运行都属于终结状态快照。"""
     resume, Store, _ = recovery_api()
     store = Store(tmp_path / "state.db")
     req = request().model_copy(update={"config": m.RunConfig(max_data_calls=data_limit)})
@@ -385,7 +385,7 @@ async def test_resume_returns_stored_terminal_result_without_calls(tmp_path, dat
 
 
 async def test_resume_rejects_changed_trusted_tool_contract_before_calls(tmp_path):
-    """A cached plan cannot silently inherit changed tool capability metadata."""
+    """缓存计划不能静默继承已经变化的工具能力元数据。"""
     resume, Store, StateStoreError = recovery_api()
     store = Store(tmp_path / "state.db")
     interrupted = InterruptingTrace(tmp_path / "traces")
@@ -422,7 +422,7 @@ async def test_resume_rejects_changed_trusted_tool_contract_before_calls(tmp_pat
 
 
 async def test_resume_preserves_original_deadline_during_downtime(tmp_path):
-    """Restarting the process must not grant another full wall-time allowance."""
+    """重启进程不能重新获得一份完整的总运行时间额度。"""
     resume, Store, StateStoreError = recovery_api()
     store = Store(tmp_path / "state.db")
     interrupted = InterruptingTrace(tmp_path / "traces")
@@ -459,7 +459,7 @@ async def test_resume_preserves_original_deadline_during_downtime(tmp_path):
 
 
 async def test_resume_keeps_consumed_model_budget(tmp_path):
-    """Replayed paid replies still consume the original run's model allowance."""
+    """重放已付费的回复时，仍须计入原始运行的模型额度。"""
     resume, Store, _ = recovery_api()
     store = Store(tmp_path / "state.db")
     interrupted = InterruptingTrace(tmp_path / "traces")
@@ -498,7 +498,7 @@ async def test_resume_keeps_consumed_model_budget(tmp_path):
 
 
 async def test_audit_failure_does_not_repeat_already_returned_tool(tmp_path):
-    """Durable reply persistence must precede fallible observation audit writes."""
+    """必须先持久化回复，再进行可能失败的观测审计写入。"""
     resume, Store, _ = recovery_api()
     store = Store(tmp_path / "state.db")
     data = RecordingData()
@@ -532,7 +532,7 @@ async def test_audit_failure_does_not_repeat_already_returned_tool(tmp_path):
 
 
 async def test_parallel_reverse_completion_reuses_every_known_reply(tmp_path):
-    """A crash during the first serial audit cannot erase a returned sibling."""
+    """首次串行审计期间崩溃，不能抹掉同批已返回任务的回复。"""
     resume, Store, _ = recovery_api()
     store = Store(tmp_path / "state.db")
     req = request().model_copy(update={"config": m.RunConfig(max_data_calls=3, max_model_calls=4)})

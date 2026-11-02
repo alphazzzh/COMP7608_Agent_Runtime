@@ -1,4 +1,4 @@
-"""Offline contract tests for the single-request asynchronous planner adapter."""
+"""单请求异步规划适配器的离线契约测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from lake_agent.planner import JsonPlanner
 
 
 def request(**changes: object) -> PlannerRequest:
-    """Build the smallest realistic controller-to-planner request."""
+    """构造最小且符合实际的控制器到规划器请求。"""
     fields = {
         "run_id": "run-1",
         "task_id": "opaque-task",

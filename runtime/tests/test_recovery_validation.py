@@ -1,7 +1,7 @@
-"""Refuse malformed durable envelopes before any fresh adapter receives I/O.
+"""在任何新适配器接收 I/O 前，拒绝格式错误的持久化封装。
 
-The storage layer verifies JSON integrity; these tests cover the independent
-runtime schema and ownership boundary, including custom StateStore providers.
+存储层验证 JSON 完整性；这些测试覆盖独立的运行时模式与所有权边界，
+也包括自定义 StateStore 提供方。
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 async def interrupted_run(store, trace_root):
-    """Create only known outcomes, isolating schema refusal from lost I/O."""
+    """仅创建结果已知的调用，将模式校验拒绝与 I/O 结果丢失区分开来。"""
     trace = InterruptingTrace(trace_root)
     task = asyncio.create_task(
         run(
@@ -49,7 +49,7 @@ async def interrupted_run(store, trace_root):
     ],
 )
 async def test_invalid_run_metadata_refused_before_ports(tmp_path, key, value):
-    """Malformed seeds/timestamps must never silently select a new call stream."""
+    """格式错误的种子或时间戳绝不能静默切换到新的调用序列。"""
     store = SqliteStateStore(tmp_path / "state.db")
     try:
         await interrupted_run(store, tmp_path / "traces")
@@ -75,7 +75,7 @@ async def test_invalid_run_metadata_refused_before_ports(tmp_path, key, value):
 
 
 class ForeignRequestStore(SqliteStateStore):
-    """A custom provider returns valid JSON with a foreign request task owner."""
+    """自定义提供方返回有效 JSON，但其中请求的任务所有者属于其他任务。"""
 
     corrupt = False
 
@@ -88,7 +88,7 @@ class ForeignRequestStore(SqliteStateStore):
 
 
 async def test_foreign_request_task_refused_during_preflight(tmp_path):
-    """Do not begin reconstruction before the whole journal validates ownership."""
+    """整个调用日志通过所有权校验之前，不得开始重建。"""
     store = ForeignRequestStore(tmp_path / "state.db")
     try:
         await interrupted_run(store, tmp_path / "traces")

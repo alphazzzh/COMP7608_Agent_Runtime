@@ -1,8 +1,8 @@
-"""Public regressions for usage declared by auxiliary catalog re-registration.
+"""辅助目录重新注册所声明用量的公开回归测试。
 
-A local-only port can still report measured or unknown token quantities. The
-controller must aggregate those declarations across restarts. An unexpected
-provider dispatch is a contract failure, but its actual charge must survive.
+仅执行本地操作的端口仍可报告已测量或未知的 token 数量。
+控制器必须跨重启累计这些声明。意外向提供方派发请求属于契约违例，
+但该请求的实际用量记账必须保留。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 class MeteredContent(RecordingContent):
-    """Keep the same implementation while changing this instance's usage report."""
+    """保持实现不变，仅更改该实例的用量报告。"""
 
     def __init__(self, reported_usage=None):
         super().__init__()
@@ -40,7 +40,7 @@ class MeteredContent(RecordingContent):
 
 
 async def interrupt_original(state_path, trace_root):
-    """Leave two known paid planner calls and one known successful tool reply."""
+    """留下两次已知付费规划调用和一次已知成功的工具回复。"""
     store = SqliteStateStore(state_path)
     trace = FrontierTrace(trace_root, "evidence.added")
     try:
@@ -60,7 +60,7 @@ async def interrupt_original(state_path, trace_root):
 
 
 async def test_auxiliary_local_port_violation_preserves_actual_provider_charge(tmp_path):
-    """Reject new frontier work without erasing a provider call already reported."""
+    """拒绝新增执行工作，同时保留已经报告的提供方调用。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     await interrupt_original(state_path, trace_root)
     usage = Usage(provider_requests=1, input_tokens=11, output_tokens=5)
@@ -81,15 +81,15 @@ async def test_auxiliary_local_port_violation_preserves_actual_provider_charge(t
         assert content.searches == content.compositions == content.verifications == []
         assert data.catalog_requests == data.tool_requests == []
         assert planner.decompositions == planner.selections == []
-        # The documented refusal raises rather than returning a business result.
-        # Public store inspection must still expose the last known accounting.
+        # 约定的拒绝方式是抛出异常，而不是返回业务结果。
+        # 通过公开存储检查接口，仍必须能够查看最后已知的记账状态。
         lease = await store.acquire("recoverable-run")
         try:
             progress = (await store.load(lease)).state["progress"]
         finally:
             await store.release(lease)
-        assert progress["call_counts"]["content"] == 3  # Original prepare/search, then rebind.
-        assert progress["call_counts"]["model_calls"] == 3  # Two planner calls plus violation.
+        assert progress["call_counts"]["content"] == 3  # 原始 prepare/search 调用，再加上重新绑定。
+        assert progress["call_counts"]["model_calls"] == 3  # 两次规划调用，加上违例调用。
         assert (progress["usage"]["input_tokens"], progress["usage"]["output_tokens"]) == (25, 11)
         failed_events = [
             event
@@ -103,8 +103,8 @@ async def test_auxiliary_local_port_violation_preserves_actual_provider_charge(t
         assert failed_events[0]["status"] == "invalid_response"
     finally:
         await store.aclose()
-    # The invalid registration remains inspectable but cannot authorize another
-    # recovery. Refusing the journal cannot invoke or charge another local port.
+    # 无效注册仍可供检查，但不能授权再次恢复。
+    # 拒绝调用日志时，不能调用另一个本地端口，也不能增加其请求用量。
     fresh_data, fresh_content, fresh_planner = RecordingData(), MeteredContent(), RecordingPlanner()
     restarted = SqliteStateStore(state_path)
     try:
@@ -134,7 +134,7 @@ async def test_auxiliary_local_port_violation_preserves_actual_provider_charge(t
 async def test_prior_auxiliary_usage_survives_another_interruption(
     tmp_path, reported_usage, expected_tokens
 ):
-    """Rebuilding ordinary calls must also retain usage from prior local rebinds."""
+    """重建普通调用时，也必须保留此前本地重新绑定所报告的用量。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     await interrupt_original(state_path, trace_root)
     first_content = MeteredContent(reported_usage)
@@ -174,6 +174,6 @@ async def test_prior_auxiliary_usage_survives_another_interruption(
     assert len(content.preparations) == len(content.compositions) == len(content.verifications) == 1
     assert planner.decompositions == []
     assert len(planner.selections) == 1
-    assert result.call_counts.content == 7  # Five ordinary calls plus two rebinds.
+    assert result.call_counts.content == 7  # 五次普通调用，加上两次重新绑定。
     assert result.call_counts.model_calls == result.usage.provider_requests == 3
     assert (result.usage.input_tokens, result.usage.output_tokens) == expected_tokens

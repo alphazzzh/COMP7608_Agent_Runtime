@@ -1,4 +1,4 @@
-"""Recovery segments preserve stable run ownership without overwriting old audit logs."""
+"""恢复分段保留稳定的运行所有权，且不覆盖旧审计日志。"""
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 def read_run_id(path):
-    """Read a closed audit segment outside asynchronous filesystem code."""
+    """在异步文件系统代码之外读取已关闭的审计分段。"""
     return json.loads(Path(path).read_text())["run_id"]
 
 

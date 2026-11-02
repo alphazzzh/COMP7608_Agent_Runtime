@@ -1,8 +1,8 @@
-"""Final-review regressions for cancellation and web recovery admission.
+"""取消与 Web 恢复准入边界的最终审查回归测试。
 
-The tests exercise the public runtime and real local ASGI/SQLite/JSONL path.
-Only an adapter cancellation gate or one committed trace event is interrupted;
-all data and planning use offline fixtures, with no external provider requests.
+测试经过公开运行接口与真实的本地 ASGI、SQLite 和 JSONL 路径。
+仅在适配器取消关卡或已提交的单个轨迹事件处中断；
+所有数据和规划均使用离线测试替身，不向外部提供方发送请求。
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from lake_agent.web.profiles import ExecutionPorts, default_profiles
 
 
 class MemoryTrace:
-    """Keep cancellation assertions independent of filesystem timing."""
+    """使取消断言不依赖文件系统操作的时序。"""
 
     def __init__(self):
         self.events = []
@@ -47,18 +47,18 @@ class MemoryTrace:
 async def test_ordinary_run_propagates_cancellation_swallowed_by_serial_adapter(
     adapter_finish, phase
 ):
-    """A swallowed caller cancellation cannot become a result or further dispatch."""
+    """被吞掉的调用方取消信号不能转变为结果，也不能触发后续派发。"""
     entered = asyncio.Event()
     calls = []
 
     async def interrupted_adapter():
-        """Expose one cancellation, then return or replace it with an exception."""
+        """接收一次取消信号，然后返回或以另一个异常替换该信号。"""
         entered.set()
         try:
             await asyncio.Future()
         except asyncio.CancelledError:
-            # The controller must preserve a finite misbehaving adapter's
-            # caller cancellation across both return and exception paths.
+            # 即使适配器错误地吞掉取消信号后仍会结束，控制器也必须在其返回和
+            # 抛出异常这两条路径中，保留来自调用方的取消信号。
             if adapter_finish == "raise":
                 raise RuntimeError("adapter replaced cancellation") from None
 
@@ -108,8 +108,8 @@ async def test_ordinary_run_propagates_cancellation_swallowed_by_serial_adapter(
             else ["catalog", "content.prepare_catalog", "planner.decompose"]
         )
         assert trace.events[-1].event_type == "run.cancelled"
-        # An interrupted model phase has no validated usage report. It retains
-        # exactly one conservative request charge; a data phase has none.
+        # 被中断的模型阶段没有通过校验的用量报告，因此保守地计入恰好一次
+        # 模型请求；数据阶段则不计入模型请求。
         assert trace.events[-1].detail["call_counts"]["model_calls"] == (
             0 if phase == "catalog" else 1
         )
@@ -122,7 +122,7 @@ async def test_ordinary_run_propagates_cancellation_swallowed_by_serial_adapter(
 
 @asynccontextmanager
 async def running_workspace(data_dir, *, profiles=None):
-    """Own the actual application lifecycle and its persistent local resources."""
+    """管理真实应用的生命周期及其持久化本地资源。"""
     app = create_app(data_dir=data_dir, profiles=profiles)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -132,7 +132,7 @@ async def running_workspace(data_dir, *, profiles=None):
 
 
 async def stopped_view(client, run_id):
-    """Observe job settlement without assuming a particular scheduling order."""
+    """观察任务最终状态的落定，不假定具体调度顺序。"""
     async with asyncio.timeout(5):
         while True:
             response = await client.get(f"/api/runs/{run_id}")
@@ -144,7 +144,7 @@ async def stopped_view(client, run_id):
 
 
 async def assert_web_resume_completes(client, run_id):
-    """A known nonterminal core journal stays resumable through the web bridge."""
+    """状态已知且尚未终结的核心调用日志，经 Web 桥接后仍应允许恢复。"""
     view = await stopped_view(client, run_id)
     assert view["can_resume"] is True, view
     response = await client.post(f"/api/runs/{run_id}/resume")
@@ -161,7 +161,7 @@ async def assert_web_resume_completes(client, run_id):
 async def test_web_preserves_core_recovery_after_known_trace_failure(
     tmp_path, monkeypatch, restart_service, adapter_cleanup
 ):
-    """A recoverable audit failure cannot become a permanent web terminal result."""
+    """可恢复的审计故障不能转变为 Web 层永久终结的结果。"""
     failed = False
     original_trace = service_module.PresentationTrace
     cleanup_entered, cleanup_release = asyncio.Event(), asyncio.Event()
@@ -176,8 +176,8 @@ async def test_web_preserves_core_recovery_after_known_trace_failure(
         try:
             yield ExecutionPorts(data=data, content=content, planner=planner)
         finally:
-            # Break only the first attempt's teardown, after the core returned
-            # its recoverable trace failure. A fresh resume owns fresh ports.
+            # 仅在核心返回可恢复的轨迹故障后，破坏第一次尝试的清理过程。
+            # 新恢复尝试拥有全新的端口。
             if first_attempt:
                 cleanup_entered.set()
                 if adapter_cleanup == "error":
@@ -192,8 +192,8 @@ async def test_web_preserves_core_recovery_after_known_trace_failure(
             nonlocal failed
             await super().append(event)
             if not failed and event.event_type == "evidence.added":
-                # The response and this event are already committed. This
-                # failure is a recoverable audit boundary, not unknown I/O.
+                # 响应与此事件都已提交。该故障发生在可恢复的审计边界，
+                # 不属于 I/O 结果未知的情况。
                 failed = True
                 raise OSError("offline final-review trace fault")
 

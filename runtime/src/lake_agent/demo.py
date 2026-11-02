@@ -1,8 +1,8 @@
-"""Offline fixtures and CLI for independent integration, never a benchmark result.
+"""供独立集成使用的离线测试替身与命令行入口，不代表基准评测结果。
 
-The fixtures intentionally perform no parsing, network calls or model inference.
-They show precisely where real data, retrieval and generation ports connect.
-All fixtures are reentrant: run state lives in request IDs or per-run handles.
+这些测试替身有意不做数据解析、网络调用或模型推理，
+只用于明确展示真实数据、检索与生成端口的接入位置。
+所有测试替身均可重入：运行状态存放于请求 ID 或各运行独有的句柄中。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ EXTRACT_SCHEMA = {
 
 
 class DemoData:
-    """Two synthetic sources, a frozen catalog and one read-only extract tool."""
+    """提供两个合成数据源、一个冻结目录和一个只读提取工具。"""
 
     def __init__(self, page_size=100):
         self.page_size = page_size
@@ -98,20 +98,20 @@ class DemoData:
                 ]
             },
             duration_ms=0,
-            # The flag describes actual clipping, including the exact-length boundary.
+            # 此标志反映是否实际截断，并覆盖恰好达到长度边界的情况。
             truncated=len(text) > max_chars,
         )
 
 
 def _reply(request, payload):
-    """A local fixture reports known zero provider usage explicitly."""
+    """本地测试替身明确上报已知为零的服务商用量。"""
     return m.ModuleResult(
         call_id=request.call_id, status="ok", data=payload, usage=m.Usage.local(), duration_ms=0
     )
 
 
 class DemoContent:
-    """Minimal local behavior for controller testing, not a retrieval algorithm."""
+    """用于控制器测试的最小本地行为，不实现检索算法。"""
 
     def __init__(self):
         self.catalogs = {}
@@ -175,7 +175,7 @@ class DemoContent:
 
 
 class DemoPlanner:
-    """Deterministic plan fixture. The genuine model adapter is JsonPlanner."""
+    """确定性的规划测试替身；真实模型适配器是 JsonPlanner。"""
 
     async def decompose(self, request):
         return _reply(

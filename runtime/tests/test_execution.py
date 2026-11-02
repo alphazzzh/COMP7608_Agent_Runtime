@@ -1,7 +1,7 @@
-"""Offline execution regressions for raw attempts and stable ready-wave selection.
+"""原始调用尝试与稳定就绪批次选择的离线回归测试。
 
-Adapters here are local coroutines. Event gates exercise cancellation without
-network calls, and selector expectations use hand-ordered independent steps.
+此处的适配器均为本地协程。事件关卡在不访问网络的情况下触发取消；
+选择器的预期结果使用手动排序且相互独立的步骤。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from lake_agent.execution import ToolAttempt, invoke_tool_attempt, select_ready_
 
 
 def attempt(*, timeout=1.0):
-    """Build one authorized-looking request without any controller or audit sink."""
+    """构造一个具有授权请求形式的请求，不依赖控制器或审计接收器。"""
     return ToolAttempt(
         request=m.ToolRequest(
             run_id="run-execution",
@@ -34,7 +34,7 @@ def attempt(*, timeout=1.0):
 
 
 def spec(name="extract", *, parallel_safe=True, uses_sources=True, keys=()):
-    """Register trusted safety and shared-resource claims for a fixture tool."""
+    """为测试工具注册可信的安全能力与共享资源声明。"""
     return m.ToolSpec(
         name=name,
         description="Local execution fixture",
@@ -48,7 +48,7 @@ def spec(name="extract", *, parallel_safe=True, uses_sources=True, keys=()):
 
 
 def step(name, source="source-a", *, tool="extract", depends_on=()):
-    """Create a stable plan entry; the selector receives already-validated plans."""
+    """创建身份稳定的计划条目；选择器接收的是已经通过校验的计划。"""
     return m.ToolStep(
         step_id=name,
         subtask_id="subtask-execution",

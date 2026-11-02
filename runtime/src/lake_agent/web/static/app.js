@@ -1,7 +1,7 @@
-/*
- * Project data-pool workspace. The server owns execution profiles, tasks,
- * evidence and imported evaluations. This client projects same-origin API state
- * with versioned reads and bounded polling. All untrusted text stays plain text.
+/**
+ * 项目数据池工作台：执行配置、任务、证据和导入评估均由服务端管理。
+ * 客户端通过带版本检查的读取和有界轮询展示同源 API 状态；
+ * 所有不可信文本均按纯文本渲染。
  */
 "use strict";
 
@@ -53,7 +53,7 @@
     evaluationVersion: 0, evaluationUserVersion: 0,
   };
 
-  /** Construct DOM nodes with textContent; server/user strings remain plain text. */
+  /** 使用 textContent 构造 DOM 节点，将服务端和用户提供的字符串保持为纯文本。 */
   function node(tag, className = "", text = null) {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -123,7 +123,7 @@
     return error?.message || "本地服务暂时不可用，请稍后重试。";
   }
 
-  /** Bound network waits; only same-origin URLs constructed by this client are used. */
+  /** 限制网络等待时间，仅访问由客户端构造的同源 URL。 */
   async function api(path, options = {}) {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15000);
@@ -184,7 +184,7 @@
     }
   }
 
-  /** Metadata explains readiness; unavailable profiles remain selectable for inspection. */
+  /** 根据元数据说明配置是否就绪；未就绪的配置仍可选择，以便查看详情。 */
   function selectProfile(id, replaceQuestion = true) {
     const profile = state.profiles.find((item) => item.profile_id === id);
     if (!profile) return;
@@ -392,7 +392,7 @@
   }
 
   function rememberRun(runId) {
-    try { window.localStorage.setItem("agent-lab:last-run", runId); } catch { /* Storage may be disabled; API history still works. */ }
+    try { window.localStorage.setItem("agent-lab:last-run", runId); } catch { /* 本地存储可能被禁用，但仍可通过 API 查看历史记录。 */ }
   }
 
   async function openRun(runId, switchView = true) {
@@ -415,7 +415,7 @@
     schedulePoll();
   }
 
-  /** Version checks prevent an old response from overwriting a newly selected run. */
+  /** 通过版本检查，防止旧响应覆盖新选中的运行记录。 */
   async function refreshRun(silent = true) {
     const runId = state.selectedRunId;
     if (!runId) return;
@@ -427,7 +427,7 @@
       state.run = run;
       state.lastPollError = null;
       setConnection(true);
-      // Avoid replacing focused event buttons on every unchanged polling response.
+      // 轮询结果未变时不重建事件按钮，避免打断键盘焦点。
       const signature = JSON.stringify(run);
       if (signature !== state.renderSignature) {
         state.renderSignature = signature;
@@ -697,7 +697,7 @@
     container.scrollTop = scroll;
   }
 
-  /** Pair calls by attempt and call ID, so replayed attempts never borrow artifacts. */
+  /** 按执行尝试和调用 ID 配对，避免恢复回放时误用其他尝试的产物。 */
   function callPair(event) {
     if (!event.call_id) return { request: null, response: null };
     const peers = safeArray(state.run?.events).filter((candidate) =>
@@ -713,7 +713,7 @@
     const key = `${runId}/${event.attempt_id}/${event.data_ref}`;
     if (state.artifactCache.has(key)) return state.artifactCache.get(key);
     const path = `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(event.attempt_id)}/${encodeURIComponent(event.data_ref)}`;
-    // Cache in-flight reads too. The bounded cache is scoped to one selected run.
+    // 同时缓存尚未完成的读取；缓存容量有限，且仅属于当前选中的运行。
     const pending = api(path);
     if (state.selectedRunId === runId) {
       state.artifactCache.set(key, pending);
@@ -840,7 +840,7 @@
     }
   }
 
-  /** A generation and in-flight guard keep rescheduling from creating overlapping polls. */
+  /** 用轮询代次和进行中标记约束重调度，避免轮询请求重叠。 */
   function schedulePoll() {
     window.clearTimeout(state.pollTimer);
     const generation = ++state.pollGeneration;
@@ -862,7 +862,7 @@
     }, delay);
   }
 
-  /** Registered source metadata is browsable without executing retrieval tools. */
+  /** 直接浏览已注册来源的元数据，无需执行检索工具。 */
   async function refreshSources() {
     const profileId = state.sourcesProfileId;
     const version = ++state.sourceVersion;
@@ -957,7 +957,7 @@
     } finally { $("refresh-profiles").disabled = false; }
   }
 
-  /** Evaluation reports are independent imported summaries, never invented trace scores. */
+  /** 评估报告是单独导入的汇总，不根据执行轨迹虚构评分。 */
   async function refreshEvaluations() {
     const version = ++state.evaluationsVersion;
     state.evaluationsLoading = true;
@@ -1132,7 +1132,7 @@
     container.replaceChildren(fragment);
   }
 
-  /** Read a bounded file, validate JSON syntax, and retain its exact numeric values. */
+  /** 读取大小受限的文件并校验 JSON 语法，保留原始数值表示。 */
   async function importEvaluation() {
     const file = $("evaluation-file").files?.[0];
     if (!file || state.evaluationImporting) return;
@@ -1149,9 +1149,9 @@
       try { JSON.parse(text); }
       catch (error) { throw new Error(`文件不是有效 JSON：${String(error.message).slice(0, 160)}`); }
       status.textContent = "正在校验并保存评估报告…";
-      // Send the original text: JSON.stringify would silently replace 1e999 with null.
+      // 发送原始文本：JSON.stringify 会将 1e999 静默替换为 null。
       const report = await api("/api/evaluations", { method: "POST", body: text });
-      state.evaluationsVersion += 1; // An older list response must not remove this newly imported report.
+      state.evaluationsVersion += 1; // 防止较早的列表响应移除刚导入的报告。
       state.evaluationsLoading = false;
       state.evaluationListError = null;
       state.evaluations = [report, ...state.evaluations.filter((item) => item.evaluation_id !== report.evaluation_id)].slice(0, 100);
@@ -1232,7 +1232,7 @@
       showNotice(errorMessage(results[0].reason), true);
     }
     let previousRun;
-    try { previousRun = window.localStorage.getItem("agent-lab:last-run"); } catch { /* Optional preference only. */ }
+    try { previousRun = window.localStorage.getItem("agent-lab:last-run"); } catch { /* 此处仅保存可选偏好设置。 */ }
     if (!state.mutation && !state.selectedRunId && previousRun && state.runs.some((run) => run.run_id === previousRun)) await openRun(previousRun, false);
     schedulePoll();
     document.addEventListener("visibilitychange", () => { if (!document.hidden) schedulePoll(); });

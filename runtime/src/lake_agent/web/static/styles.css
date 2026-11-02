@@ -1,11 +1,10 @@
 /*
- * Project workspace visual system: warm paper, quiet ink and teal actions.
- * The question and its evidence are primary; source metadata, saved tasks and
- * imported evaluations share the same local, responsive, accessible controls.
- * No remote fonts, images or scripts are required.
+ * 项目工作台样式：采用浅纸色背景、低饱和文字和青绿色操作控件。
+ * 以问题和证据为主要内容；来源元数据、历史任务和导入评估
+ * 统一使用本地、响应式且支持无障碍操作的控件，无需远程字体、图片或脚本。
  */
 
-/* Shared tokens, native controls and keyboard accessibility. */
+/* 共享样式变量、原生控件和键盘无障碍支持。 */
 :root {
   --paper: #f7f8f4;
   --surface: #fff;
@@ -46,7 +45,7 @@ svg { display: block; width: 100%; height: 100%; }
 .connection-dot.online { background: var(--teal); }
 .connection-dot.offline { background: var(--danger); }
 
-/* Persistent desktop navigation and a compact task history. */
+/* 桌面端固定导航与紧凑的任务历史。 */
 .app-shell { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { position: sticky; top: 0; height: 100vh; min-width: 0; padding: 32px 18px 20px; background: #f0f3ec; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .brand { display: flex; gap: 11px; align-items: center; padding: 0 11px; font-size: 22px; font-weight: 700; letter-spacing: -.65px; }
@@ -82,7 +81,7 @@ svg { display: block; width: 100%; height: 100%; }
 .sidebar-meta { display: flex; justify-content: space-between; gap: 6px; margin-top: 16px; padding: 0 4px; font-size: 9px; color: #7d8876; }
 #connection-label { display: inline-flex; align-items: center; gap: 5px; }
 
-/* Main page frame, small action controls and consistent surface headings. */
+/* 主页面框架、小型操作控件和统一的区域标题。 */
 .main-shell { min-width: 0; display: flex; flex-direction: column; }
 .topbar { height: 68px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 42px; }
 .breadcrumb { display: flex; align-items: center; gap: 13px; color: #8c988e; font-size: 9px; letter-spacing: 1.3px; }
@@ -121,7 +120,7 @@ h1 { font-size: 29px; font-weight: 650; line-height: 1.4; letter-spacing: -.8px;
 .notice { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 10px 14px; margin-bottom: 20px; background: #eaf3e7; border: 1px solid #d8e6ce; border-radius: 8px; color: #507347; font-size: 12px; overflow-wrap: anywhere; }
 .notice.is-error { background: #fcf0eb; border-color: #ebd6c9; color: #994e3b; }
 
-/* Profile selection and question entry. Missing module state stays explicit. */
+/* 执行配置选择与问题输入，明确展示尚未接入的模块。 */
 .setup-panel { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 21px 24px 0; box-shadow: 0 3px 9px #20352b02; }
 .run-form { margin-top: 18px; }
 .profile-field { display: grid; gap: 7px; }
@@ -164,7 +163,7 @@ textarea:disabled { background: #f6f8f1; }
 .mode-field label { font-size: 11px; color: #79876f; flex: none; }
 .mode-field select { min-width: 0; max-width: 100%; padding: 5px 28px 5px 9px; border: 1px solid #e0e7d9; border-radius: 5px; background: #fff; font-size: 11px; color: #5d7357; }
 
-/* Primary result: readable answers and actual evidence fragments. */
+/* 主要结果区域：便于阅读的答案与实际证据片段。 */
 .execution-section { margin-top: 29px; }
 .execution-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-bottom: 14px; }
 .run-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -221,7 +220,7 @@ summary { cursor: pointer; }
 .source-item p { color: #879776; font-size: 11px; margin: 4px 0; line-height: 1.8; }
 .source-item code { color: #9baa8c; font-size: 10px; }
 
-/* Detailed execution is available on demand, including parallel and replayed calls. */
+/* 按需展开执行详情，包括并行调用与历史响应回放。 */
 .audit-details { border: 1px solid var(--line); border-radius: 9px; margin-top: 16px; background: #fbfcf8; }
 .audit-details > summary { display: flex; align-items: center; gap: 13px; padding: 13px 17px; color: #647b59; font-size: 12px; list-style: none; }
 .audit-details > summary::-webkit-details-marker { display: none; }
@@ -284,7 +283,7 @@ summary { cursor: pointer; }
 .capability-status.pending { color: #a08a51; background: #faf6e6; border-color: #ece3c6; }
 .capability-card p { color: #8c9f7d; font-size: 11px; line-height: 1.8; margin-top: 9px; overflow-wrap: anywhere; }
 
-/* Source catalog and saved task filters use the same compact toolbar language. */
+/* 来源目录与历史任务筛选使用统一的紧凑工具栏。 */
 .catalog-notice { display: flex; gap: 12px; padding: 14px 16px; border: 1px solid #dfe9d7; border-radius: 8px; background: #eef4e8; color: #718661; font-size: 12px; line-height: 1.8; }
 .catalog-notice > span { color: #8ba274; font-size: 17px; flex: none; }
 .sources-toolbar, .history-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 23px 0 17px; }
@@ -334,7 +333,7 @@ summary { cursor: pointer; }
 .history-card-arrow { position: absolute; right: 22px; top: 50%; font-size: 23px; color: #9bb28a; transform: translateY(-50%); }
 .history-empty { border: 1px dashed #dbe5d0; border-radius: 9px; min-height: 280px; }
 
-/* Evaluation imports stay separate from live execution metrics. */
+/* 导入的评估报告与实际运行指标分别展示。 */
 .evaluation-import { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px 24px; padding: 21px 23px; }
 .evaluation-import h2 { color: #5b7c4b; font-size: 14px; font-weight: 550; }
 .evaluation-import p { color: #8b9f7a; font-size: 11px; margin-top: 5px; line-height: 1.8; }
@@ -373,7 +372,7 @@ summary { cursor: pointer; }
 .app-footer > span:first-child > span { margin: 0 8px; color: #c1cbb4; }
 .app-footer > span:last-child { color: #a6b19a; font: 8px var(--mono); letter-spacing: .8px; }
 
-/* Laptop and compact layouts preserve descriptive text without horizontal page overflow. */
+/* 笔记本与紧凑布局保留说明文字，并避免页面横向溢出。 */
 @media (min-width: 1550px) {
   .app-shell { grid-template-columns: 248px minmax(0, 1fr); }
   .sidebar { padding-left: 23px; padding-right: 23px; }
@@ -454,7 +453,7 @@ summary { cursor: pointer; }
   .app-footer { flex-wrap: wrap; gap: 9px; margin-top: 20px; font-size: 8px; }
 }
 
-/* Phone navigation becomes a four-item row and all main content stacks. */
+/* 手机端导航改为四项横排，主要内容纵向排列。 */
 @media (max-width: 680px) {
   .app-shell { display: block; }
   .sidebar { position: static; height: auto; padding: 20px 19px 0; border-right: 0; border-bottom: 1px solid var(--line); background: #f0f3ec; }
@@ -620,7 +619,7 @@ summary { cursor: pointer; }
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
 
-/* Readability: small supporting text retains sufficient contrast on pale surfaces. */
+/* 可读性：浅色背景上的辅助小字保持足够对比度。 */
 .page-description, .section-caption, .muted-caption, .profile-dataset-meta,
 .module-name, .module-state small, .profile-description, .input-footer,
 .suggestion-button, .mode-field label, .output-caption, .selected-run-info,

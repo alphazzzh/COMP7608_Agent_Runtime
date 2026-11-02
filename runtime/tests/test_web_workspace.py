@@ -1,8 +1,7 @@
-"""Offline acceptance checks for explicitly registered project workspaces.
+"""显式注册项目工作区的离线验收测试。
 
-These tests drive the actual ASGI application, controller, durable checkpoints
-and trace projection. Local demo ports provide deterministic outputs while a
-real asynchronous context manager records adapter ownership and cleanup.
+这些测试驱动真实 ASGI 应用、控制器、持久化检查点与轨迹投影。
+本地演示端口提供确定性输出，真实异步上下文管理器记录适配器所有权与清理。
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ _PRIVATE_CREDENTIAL = "workspace-test-credential-do-not-publish"
 
 
 class OwnedDemoData(DemoData):
-    """Exercise genuine local extraction while exposing context-owned lifetime."""
+    """执行真实的本地提取，同时暴露由上下文管理的生命周期。"""
 
     def __init__(self):
         super().__init__()
@@ -40,7 +39,7 @@ class OwnedDemoData(DemoData):
 
 
 class PortOwner:
-    """A trusted factory that allocates fresh offline ports and releases them."""
+    """可信工厂，负责分配全新离线端口并释放这些端口。"""
 
     def __init__(self):
         self.opened = []
@@ -60,7 +59,7 @@ class PortOwner:
 
 
 def registered_profile(owner, *, revision="test-v1", sources=None, config=None, pause=False):
-    """Register only offline objects; connected describes this trusted injection."""
+    """仅注册离线对象；connected 描述这一可信注入方式。"""
     module = importlib.import_module("lake_agent.web.profiles")
     metadata = module.ProfileMetadata(
         profile_id="project-test",
@@ -86,7 +85,7 @@ def registered_profile(owner, *, revision="test-v1", sources=None, config=None, 
 
 
 def assert_public_payload(value):
-    """Credentials and callable/recovery implementation details are never public."""
+    """凭据、可调用对象与恢复实现细节绝不对外公开。"""
     encoded = json.dumps(value)
     assert _PRIVATE_CREDENTIAL not in encoded
     for private in ("profile_signature", "ports_factory", "credentials"):
@@ -94,7 +93,7 @@ def assert_public_payload(value):
 
 
 async def wait_stopped(client, run_id):
-    """Bound waiting on real persisted execution rather than assuming scheduling."""
+    """为真实持久化执行设置等待上限，不假定调度时序。"""
     async with asyncio.timeout(8):
         while True:
             response = await client.get(f"/api/runs/{run_id}")
@@ -106,7 +105,7 @@ async def wait_stopped(client, run_id):
 
 
 async def submit_profile_run(client, profile_id="project-test"):
-    """Use the public configuration selector and retain its saved identity."""
+    """使用公开配置选择器，并保留其已保存的身份标识。"""
     response = await client.post(
         "/api/runs",
         json={"question": "What was 2024 annual revenue?", "profile_id": profile_id},
@@ -117,7 +116,7 @@ async def submit_profile_run(client, profile_id="project-test"):
 
 @asynccontextmanager
 async def workspace_client(data_dir, **kwargs):
-    """Open the real app lifespan so SQLite, jobs and resources are drained."""
+    """进入真实应用生命周期，确保 SQLite、任务和资源均完成收尾。"""
     module = importlib.import_module("lake_agent.web.app")
     app = module.create_app(data_dir=data_dir, **kwargs)
     async with app.router.lifespan_context(app):
@@ -128,7 +127,7 @@ async def workspace_client(data_dir, **kwargs):
 
 
 async def test_default_profile_catalog_marks_project_unavailable(tmp_path):
-    """Missing real modules cannot silently run a demo as the project data pool."""
+    """缺少真实模块时，不能静默改用演示实现充当项目数据池。"""
     async with workspace_client(tmp_path) as client:
         response = await client.get("/api/profiles")
         assert response.status_code == 200, response.text
@@ -160,7 +159,7 @@ async def test_default_profile_catalog_marks_project_unavailable(tmp_path):
 
 
 async def test_registered_profile_directory_is_public_and_does_not_open_ports(tmp_path):
-    """Catalog reads expose registration metadata without constructing clients."""
+    """目录读取仅暴露注册元数据，不构造客户端。"""
     owner = PortOwner()
     profile = registered_profile(owner)
     async with workspace_client(tmp_path, profiles=(profile,)) as client:
@@ -191,7 +190,7 @@ async def test_registered_profile_directory_is_public_and_does_not_open_ports(tm
 
 
 async def test_unknown_profile_and_conflicting_selectors_do_not_create_history(tmp_path):
-    """A typo or ambiguous legacy selector cannot launch an unintended adapter."""
+    """拼写错误或有歧义的旧选择器不能启动非预期的适配器。"""
     async with workspace_client(tmp_path) as client:
         missing = await client.get("/api/profiles/no-such-profile/sources")
         assert missing.status_code == 404
@@ -207,7 +206,7 @@ async def test_unknown_profile_and_conflicting_selectors_do_not_create_history(t
 
 
 async def test_registered_profile_uses_fresh_context_for_runs_and_resume(tmp_path):
-    """Run and recovery own separate clients; all exits close the prior context."""
+    """运行与恢复分别拥有独立客户端；所有退出路径均关闭此前上下文。"""
     owner = PortOwner()
     profile = registered_profile(owner, pause=True)
     async with workspace_client(tmp_path, profiles=(profile,)) as client:
@@ -250,7 +249,7 @@ async def test_registered_profile_uses_fresh_context_for_runs_and_resume(tmp_pat
 
 @pytest.mark.parametrize("change", ["missing", "revision", "sources", "run_config"])
 async def test_recovery_refuses_missing_or_changed_registration_before_factory(tmp_path, change):
-    """Changing a saved execution contract cannot create clients or mutate history."""
+    """修改已保存的执行契约不能创建客户端或改写历史。"""
     first_owner = PortOwner()
     original = registered_profile(first_owner, pause=True)
     async with workspace_client(tmp_path, profiles=(original,)) as client:
@@ -288,7 +287,7 @@ async def test_recovery_refuses_missing_or_changed_registration_before_factory(t
 
 
 async def test_legacy_default_and_scenario_selectors_resolve_to_demo_profiles(tmp_path):
-    """Existing clients keep their offline default and explicit recovery mapping."""
+    """现有客户端保留其离线默认行为和显式恢复映射。"""
     async with workspace_client(tmp_path) as client:
         for payload, expected in (
             ({}, "demo-standard"),
@@ -307,7 +306,7 @@ async def test_legacy_default_and_scenario_selectors_resolve_to_demo_profiles(tm
 
 
 def test_duplicate_registration_ids_are_rejected_before_startup(tmp_path):
-    """A duplicated public selector must never choose a factory by ordering."""
+    """公开选择器重复时，绝不能根据排列顺序选取工厂。"""
     profile = registered_profile(PortOwner())
     module = importlib.import_module("lake_agent.web.app")
     with pytest.raises(ValueError):
@@ -315,7 +314,7 @@ def test_duplicate_registration_ids_are_rejected_before_startup(tmp_path):
 
 
 async def test_profile_run_config_budget_is_applied_and_preserves_terminal_status(tmp_path):
-    """A registered data-call budget must reach the core and stay visible to users."""
+    """注册的数据调用预算必须传入核心，并持续对用户可见。"""
     owner = PortOwner()
     profile = registered_profile(
         owner,
@@ -334,7 +333,7 @@ async def test_profile_run_config_budget_is_applied_and_preserves_terminal_statu
 
 
 async def test_registered_project_report_uses_saved_profile_identity(tmp_path):
-    """A project export must identify its registered pool rather than label all data demo."""
+    """项目导出必须标明其注册数据池，不能将所有数据都标为演示数据。"""
     owner = PortOwner()
     profile = registered_profile(owner)
     async with workspace_client(tmp_path, profiles=(profile,)) as client:
@@ -351,7 +350,7 @@ async def test_registered_project_report_uses_saved_profile_identity(tmp_path):
 
 
 def evaluation_payload():
-    """Imported unknowns stay null; this fixture makes no quality-score claim."""
+    """导入的未知值保持为 null；此测试替身不作质量分数声明。"""
     return {
         "title": "User supplied offline report",
         "dataset_id": "registered-test-data",
@@ -365,7 +364,7 @@ def evaluation_payload():
 
 
 async def test_evaluation_template_and_import_preserve_unknowns_after_restart(tmp_path):
-    """A downloaded template is separate from persisted, explicitly imported reports."""
+    """下载的模板与已显式导入并持久化的报告相互独立。"""
     async with workspace_client(tmp_path) as client:
         assert (await client.get("/api/evaluations")).json() == {"evaluations": []}
         template = await client.get("/api/evaluations/template")
@@ -386,8 +385,8 @@ async def test_evaluation_template_and_import_preserve_unknowns_after_restart(tm
         assert all(value is None for value in imported["results"][0]["metrics"].values())
         downloaded = await client.get(f"/api/evaluations/{identity}")
         assert downloaded.json() == imported
-        # Embedded browsers may ignore an anchor's download attribute. The
-        # server must also identify this JSON response as a named attachment.
+        # 内嵌浏览器可能忽略锚点的 download 属性。
+        # 服务器也必须将此 JSON 响应标明为具名附件。
         assert downloaded.headers.get("content-disposition") == (
             f'attachment; filename="{identity}.json"'
         )
@@ -400,12 +399,12 @@ async def test_evaluation_template_and_import_preserve_unknowns_after_restart(tm
 
 
 async def test_evaluation_rejects_duplicate_modes_oversize_and_foreign_origin(tmp_path):
-    """Invalid imports cannot create a report, including a streamed oversized body."""
+    """无效导入不能创建报告，包括以流式方式传入的超大请求体。"""
     payload = evaluation_payload()
     payload["results"] *= 2
 
     async def oversized_chunks():
-        # No Content-Length is sent: the HTTP boundary must count received bytes.
+        # 不发送 Content-Length：HTTP 边界必须统计实际收到的字节数。
         yield b" " * 65_536
         yield b" " * 65_536
         yield b"x"

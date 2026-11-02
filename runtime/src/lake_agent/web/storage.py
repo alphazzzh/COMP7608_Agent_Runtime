@@ -1,9 +1,9 @@
-"""Private presentation metadata and a bounded projection of committed audit data.
+"""存储私有的展示元数据，并生成已提交审计数据的有界视图。
 
-The core SQLite state remains the sole recovery source. This repository stores
-only UI metadata, reads validated audit events, and follows references belonging
-to the requested run/attempt. All filesystem operations run in observed workers.
-A process lock rejects multiple web owners of one data directory.
+核心 SQLite 状态仍是唯一的恢复依据。本仓库只保存界面元数据，
+读取经校验的审计事件，且只沿用属于所请求运行和尝试的引用。
+所有文件系统操作均由受跟踪的工作线程执行。
+进程锁禁止多个网页服务实例同时占有同一个数据目录。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _RUN = re.compile(r"run-[0-9a-f]{32}\Z")
 
 
 class WebError(Exception):
-    """Fixed public code/message; no paths, stored data or raw exceptions leak."""
+    """使用固定的公开错误码与消息，不泄露路径、存储内容或原始异常。"""
 
     def __init__(self, code, message, status=409):
         self.code, self.message, self.status = code, message, status
@@ -36,7 +36,7 @@ def utc_now():
 
 
 async def disk(method, *args):
-    """Drain filesystem work on cancellation so writes cannot outlive ownership."""
+    """收到取消时等待文件系统任务收尾，避免写入超出资源的持有期。"""
     job = asyncio.create_task(asyncio.to_thread(method, *args))
     try:
         return await asyncio.shield(job)
@@ -48,14 +48,14 @@ async def disk(method, *args):
                 continue
             except Exception:
                 break
-        # Observe a possible worker exception without replacing cancellation.
+        # 获取工作线程可能抛出的异常，但不让它替换原取消异常。
         if job.done() and not job.cancelled():
             job.exception()
         raise
 
 
 class Repository:
-    """UI manifests, ordered trace segments and referenced artifacts only."""
+    """仅管理界面清单、有序轨迹分段及其引用的工件。"""
 
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
@@ -102,7 +102,7 @@ class Repository:
                 os.close(descriptor)
 
     async def save(self, record):
-        # Freeze mutable nested data before scheduling a disk worker.
+        # 调度磁盘工作线程前，先冻结可变的嵌套数据。
         encoded = canonical_json(record)
         await disk(self._save, record["run_id"], encoded)
 
@@ -139,7 +139,7 @@ class Repository:
             raise WebError("history_unavailable", "运行记录无法读取。", 503) from None
 
     async def listing(self, *, limit=100):
-        """Cap browser history while allowing startup to reconcile every record."""
+        """限制浏览器历史记录数量，同时允许启动过程核对并修正全部记录。"""
         return await disk(self._listing, limit)
 
     def _listing(self, limit):
@@ -147,8 +147,8 @@ class Repository:
         return sorted(records, key=lambda value: value["created_at"], reverse=True)[:limit]
 
     def _attempts(self, record):
-        # Include a segment reserved immediately before an abrupt process exit,
-        # even if the UI manifest callback had not yet committed its identity.
+        # 纳入进程突然退出前刚刚预留的分段，即使界面清单回调
+        # 尚未来得及提交该分段的身份信息。
         ids = [value["attempt_id"] for value in record["attempts"]]
         folder = self._inside(self.traces / record["run_id"] / "attempts", self.traces)
         if folder.exists():
@@ -173,7 +173,7 @@ class Repository:
         raw = path.read_bytes()
         lines = raw.splitlines()
         if raw and not raw.endswith(b"\n"):
-            lines = lines[:-1]  # Only an in-progress trailing row may be incomplete.
+            lines = lines[:-1]  # 只有仍在写入的末行可以不完整。
         events = []
         for line in lines:
             try:
@@ -265,8 +265,8 @@ class Repository:
             ),
         }
         if result:
-            # Browser/export consumers need a logical audit location, never the
-            # operator's absolute local filesystem path.
+            # 浏览器和导出使用方需要的是逻辑审计位置，
+            # 不应得到操作人员本地文件系统的绝对路径。
             result["trace_ref"] = (
                 f"{run_id}/attempts/{attempts[-1]['attempt_id']}/events.jsonl" if attempts else None
             )

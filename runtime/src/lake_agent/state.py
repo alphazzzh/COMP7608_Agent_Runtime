@@ -1,15 +1,13 @@
-"""Optional durable run state and call ledger for a single local POSIX host.
+"""面向单台本地 POSIX 主机的可选持久化运行状态及调用账本。
 
-SQLite WAL transactions with FULL synchronization protect committed snapshots.
-An adjacent private directory contains one advisory ``flock`` file per run;
-the open descriptor, rather than a timestamp, owns the lease. Process exit
-releases that lock, and a new owner replaces the persisted random token. These
-are local filesystem locks, not distributed leases or network-filesystem claims.
+采用 FULL 同步的 SQLite WAL 事务保护已提交快照。相邻私有目录为每次运行保存一个
+咨询锁 ``flock`` 文件；租约由打开的描述符持有，不依赖时间戳。进程退出会释放锁，
+新所有者会替换持久化随机令牌。这些是本地文件系统锁，不是分布式租约，
+也不提供网络文件系统上的所有权保证。
 
-The caller owns this store's lifecycle and must call ``aclose``. All filesystem
-work runs in threads. Cancellation waits for the dispatched thread to finish
-before propagating, so a cancelled write cannot mutate a later owner's state.
-A cancelled acquisition also releases its otherwise unreturned lease.
+调用方负责存储生命周期，必须调用 ``aclose``。所有文件系统工作在线程中执行。
+取消须等待已派发线程结束后才传播，确保已取消的写入不会修改后续所有者的状态。
+获取租约时若被取消，也会释放尚未返回给调用方的租约。
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ _MESSAGES = {
 
 
 class StateStoreError(Exception):
-    """Stable error code with a fixed message that excludes stored data and paths."""
+    """提供稳定错误码及固定消息，不暴露存储数据或路径。"""
 
     def __init__(self, code: str):
         self.code = code
@@ -65,7 +63,7 @@ class StateStoreError(Exception):
 
 @dataclass(frozen=True)
 class StateLease:
-    """Opaque ownership proof; a previous acquisition's token cannot be reused."""
+    """不透明的所有权凭证；之前获取租约时的令牌不能复用。"""
 
     run_id: str
     token: str
@@ -73,14 +71,14 @@ class StateLease:
 
 @dataclass
 class StoredRun:
-    """Detached JSON snapshots that callers may safely mutate in memory."""
+    """与存储对象分离的 JSON 快照，调用方可安全地在内存中修改。"""
 
     state: dict
     calls: dict[str, dict]
 
 
 class StateStore(Protocol):
-    """Minimal persistence boundary; implementations own storage, not execution."""
+    """最小持久化边界；实现只负责存储，不负责执行。"""
 
     async def create(self, run_id: str, state: dict) -> StateLease: ...
     async def acquire(self, run_id: str) -> StateLease: ...
@@ -93,7 +91,7 @@ class StateStore(Protocol):
 
 
 def _identifier(value: str) -> str:
-    """Run identifiers become digest filenames, never caller-selected paths."""
+    """运行标识符会转换为摘要文件名，绝不作为调用方指定的路径使用。"""
     if not isinstance(value, str) or not value:
         raise StateStoreError("invalid_record")
     try:
@@ -104,7 +102,7 @@ def _identifier(value: str) -> str:
 
 
 def _encode(value: dict) -> tuple[str, str]:
-    """Reject Python coercions (non-string keys, tuples, sets) before encoding."""
+    """编码前拒绝 Python 的隐式转换，包括非字符串键、元组和集合。"""
     if type(value) is not dict:
         raise StateStoreError("invalid_json")
     pending: list[Any] = [value]
@@ -114,7 +112,7 @@ def _encode(value: dict) -> tuple[str, str]:
         kind = type(item)
         if kind in (dict, list):
             if id(item) in visited:
-                continue  # json.dumps below detects actual circular references.
+                continue  # 下面的 json.dumps 会检测真正的循环引用。
             visited.add(id(item))
             if kind is dict:
                 if any(type(key) is not str for key in item):
@@ -136,7 +134,7 @@ def _encode(value: dict) -> tuple[str, str]:
 
 
 def _decode(text: str, digest: str) -> dict:
-    """Check the exact persisted bytes before decoding a detached object."""
+    """先校验持久化的确切字节，再解码为独立对象。"""
     try:
         actual = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if not hmac.compare_digest(actual, digest):
@@ -151,11 +149,10 @@ def _decode(text: str, digest: str) -> dict:
 
 
 async def _observe_thread(function: Callable[..., _T], *args: Any) -> tuple[_T, bool]:
-    """Drain a shielded worker even under repeated caller cancellation.
+    """即使调用方反复取消，也等待受屏蔽保护的工作任务结束。
 
-    Merely shielding ``to_thread`` is insufficient: it lets its caller return
-    while the worker still holds a descriptor or may still commit a write.
-    Retain the task, observe its result, and only then propagate cancellation.
+    仅屏蔽 ``to_thread`` 的取消并不充分：调用方可能已经返回，线程却仍持有描述符，
+    或仍可能提交写入。必须保留任务、获取其结果，然后才传播取消。
     """
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     cancelled = False
@@ -165,7 +162,7 @@ async def _observe_thread(function: Callable[..., _T], *args: Any) -> tuple[_T, 
         except asyncio.CancelledError:
             cancelled = True
         except Exception:
-            break  # Retrieve the exception below, without losing cancellation.
+            break  # 在下面获取异常，同时保留取消。
     try:
         result = task.result()
     except BaseException:
@@ -176,13 +173,11 @@ async def _observe_thread(function: Callable[..., _T], *args: Any) -> tuple[_T, 
 
 
 class SqliteStateStore:
-    """Caller-managed local SQLite backend with one nonblocking lease per run.
+    """由调用方管理的本地 SQLite 后端，每次运行使用一个非阻塞获取的租约。
 
-    Construction performs no disk I/O. Each operation opens and closes its own
-    SQLite connection in a worker. A thread mutex serializes instance lifecycle
-    changes and descriptor bookkeeping; SQLite serializes database transactions
-    across instances. Lock files stay in place permanently: unlinking a live
-    lock file would allow two processes to lock different inodes for one run.
+    构造时不执行磁盘 I/O。每次操作均在工作线程中打开并关闭自己的 SQLite 连接。
+    线程互斥锁串行保护实例生命周期变更和描述符登记，SQLite 负责跨实例事务串行化。
+    锁文件永久保留：删除正在使用的锁文件，会让两个进程对同一运行锁定不同 inode。
     """
 
     def __init__(self, path: str | Path):
@@ -194,35 +189,35 @@ class SqliteStateStore:
         self._closed = False
 
     async def create(self, run_id: str, state: dict) -> StateLease:
-        """Create a new run and acquire its ownership without overwriting a run."""
+        """创建新运行并获取所有权，不覆盖已有运行。"""
         return await self._invoke(self._create, run_id, state, acquires=True)
 
     async def acquire(self, run_id: str) -> StateLease:
-        """Acquire an existing run, replacing a departed owner's stale token."""
+        """获取已有运行的所有权，并替换已退出所有者留下的失效令牌。"""
         return await self._invoke(self._acquire, run_id, acquires=True)
 
     async def load(self, lease: StateLease) -> StoredRun:
-        """Read one consistent state/ledger snapshot and verify every checksum."""
+        """读取一致的状态和账本快照，并验证全部校验和。"""
         return await self._invoke(self._load, lease)
 
     async def save(self, lease: StateLease, state: dict) -> None:
-        """Atomically replace the state object while retaining the call ledger."""
+        """原子替换状态对象，同时保留调用账本。"""
         await self._invoke(self._save, lease, state)
 
     async def begin_call(self, lease: StateLease, call_id: str, value: dict) -> None:
-        """Insert the immutable started record before dispatching a side effect."""
+        """在派发副作用操作前插入不可变的 started 记录。"""
         await self._invoke(self._write_call, lease, call_id, value, False)
 
     async def finish_call(self, lease: StateLease, call_id: str, value: dict) -> None:
-        """Replace a started record once with its complete, validated response."""
+        """用完整且经过验证的响应替换 started 记录，且只允许替换一次。"""
         await self._invoke(self._write_call, lease, call_id, value, True)
 
     async def release(self, lease: StateLease) -> None:
-        """Release ownership; repeating a release of this lease is harmless."""
+        """释放所有权；重复释放同一个租约不会产生额外影响。"""
         await self._invoke(self._release, lease, allow_closed=True)
 
     async def aclose(self) -> None:
-        """Release all owned descriptors, even if one database update fails."""
+        """释放全部自有描述符，即使其中一次数据库更新失败也如此。"""
         await self._invoke(self._close, allow_closed=True)
 
     async def _invoke(
@@ -235,12 +230,12 @@ class SqliteStateStore:
         result, cancelled = await _observe_thread(self._perform, action, args, allow_closed)
         if cancelled:
             if acquires:
-                # The caller never received this ownership proof. Clean it up
-                # before returning cancellation, including repeated cancels.
+                # 调用方从未收到此所有权凭证。返回取消前先清理，
+                # 即使反复取消也如此。
                 try:
                     await _observe_thread(self._perform, self._release, (result,), True)
                 except Exception:
-                    pass  # _release always closes the descriptor in its finally.
+                    pass  # _release 始终在 finally 中关闭描述符。
             raise asyncio.CancelledError
         return result
 
@@ -253,26 +248,26 @@ class SqliteStateStore:
             except StateStoreError:
                 raise
             except (sqlite3.Error, OSError):
-                # SQLite/OS errors may include paths, SQL or stored values.
+                # SQLite 或操作系统错误可能包含路径、SQL 或已存储值。
                 raise StateStoreError("storage_error") from None
 
     @staticmethod
     def _private_directory(path: Path) -> None:
-        """Create missing parents privately, and refuse symlink lock directories."""
+        """以私有权限创建缺失的父目录，并拒绝符号链接形式的锁目录。"""
         if not path.exists():
             if not path.parent.exists():
                 SqliteStateStore._private_directory(path.parent)
             try:
                 path.mkdir(mode=0o700)
             except FileExistsError:
-                pass  # A cooperating instance may have created it concurrently.
+                pass  # 协作的其他实例可能已并发创建该目录。
         info = path.lstat()
         if not stat.S_ISDIR(info.st_mode):
             raise StateStoreError("storage_error")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        """Gate schema before changing pragmas, permissions, or existing tables."""
+        """在修改 pragma、权限或现有表之前先校验数据库结构。"""
         self._private_directory(self.path.parent)
         flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
         descriptor = os.open(self.path, flags, 0o600)
@@ -287,22 +282,22 @@ class SqliteStateStore:
             if version not in (0, _SCHEMA_VERSION):
                 raise StateStoreError("schema_mismatch")
             if version == 0:
-                # An unversioned nonempty database belongs to someone else.
+                # 非空且无版本号的数据库属于其他应用。
                 if connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1"
                 ).fetchone():
-                    # These are separate autocommit reads: another initializer
-                    # may have committed both tables and the version between
-                    # them. Accept its now-current schema instead of reporting
-                    # an unversioned foreign database.
+                    # 这些读取分别自动提交：另一个初始化器可能在两次读取之间
+                    # 已提交表和版本号。若其结构现已是当前版本，
+                    # 则接受该结构，避免误报为
+                    # 其他应用的无版本数据库。
                     version = connection.execute("PRAGMA user_version").fetchone()[0]
                     if version != _SCHEMA_VERSION:
                         raise StateStoreError("schema_mismatch")
             if version == 0:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
-                    # Recheck after the write lock: another instance may have
-                    # initialized the empty database while we were waiting.
+                    # 获取写锁后再次检查：等待期间，其他实例可能
+                    # 已完成空数据库的初始化。
                     version = connection.execute("PRAGMA user_version").fetchone()[0]
                     if version == 0:
                         if connection.execute(
@@ -335,16 +330,16 @@ class SqliteStateStore:
             if tables != _SCHEMA_COLUMNS.keys():
                 raise StateStoreError("schema_mismatch")
             for table, expected in _SCHEMA_COLUMNS.items():
-                # Names come exclusively from the fixed local schema constant.
+                # 名称仅来自固定的本地数据库结构常量。
                 columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
                 if columns != expected:
                     raise StateStoreError("schema_mismatch")
             os.chmod(self.path, 0o600)
-            # Set WAL outside a transaction. Sidecar permissions inherit the
-            # already-private database mode, avoiding process-global umask edits.
-            # Simultaneous first-open journal transitions can return SQLITE_BUSY
-            # immediately instead of honoring SQLite's busy timeout. Retry this
-            # one idempotent pragma within the same bounded five-second window.
+            # 在事务外设置 WAL。旁路文件权限继承数据库已有的私有权限，
+            # 避免修改进程级 umask。
+            # 首次并发打开时，日志模式切换可能立即返回 SQLITE_BUSY，
+            # 而不遵守 SQLite 的忙等待超时；仅在同一个有界五秒窗口内
+            # 重试这一幂等 pragma。
             deadline = time.monotonic() + 5
             while True:
                 try:
@@ -369,7 +364,7 @@ class SqliteStateStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        """Use a single snapshot for token validation and the associated change."""
+        """在同一快照中完成令牌验证和相应变更。"""
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -411,8 +406,8 @@ class SqliteStateStore:
     def _take_lease(self, run_id: str, state: dict | None) -> StateLease:
         run_id = _identifier(run_id)
         encoded = _encode(state) if state is not None else None
-        # Initialize before opening the adjacent lock file. No lock ownership
-        # is registered until the database transaction commits successfully.
+        # 先初始化，再打开相邻锁文件。数据库事务成功提交前，
+        # 不登记任何锁所有权。
         with self._connection():
             pass
         descriptor = self._lock_run(run_id)
@@ -549,7 +544,7 @@ class SqliteStateStore:
                     "UPDATE run_states SET lease_token=NULL WHERE run_id=?", (lease.run_id,)
                 )
         finally:
-            # Even corrupted/unavailable storage must not leak OS ownership.
+            # 即使存储损坏或不可用，也不能泄漏操作系统锁的所有权。
             self._leases.pop(lease.run_id, None)
             self._released.add(lease)
             self._unlock(descriptor)

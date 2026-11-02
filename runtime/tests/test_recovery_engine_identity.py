@@ -1,8 +1,7 @@
-"""Graph engine upgrades must not reuse an incompatible durable execution.
+"""图引擎升级后不得复用不兼容的持久化执行。
 
-Source hashes alone cannot detect a different installed scheduler. These tests
-change only package metadata, without editing source or persistent run records,
-and require that recovery's implementation identity changes with the engine.
+仅凭源代码哈希无法检测安装的调度器版本变化。这些测试只修改包元数据，
+不编辑源代码或持久化运行记录，并要求恢复流程的实现身份随引擎变化。
 """
 
 from importlib import metadata
@@ -16,7 +15,7 @@ from lake_agent.recovery import _implementation_digest
     "package", ["langgraph", "langchain-core", "langgraph-checkpoint", "langsmith"]
 )
 def test_graph_dependency_version_changes_recovery_identity(monkeypatch, package):
-    """A version-only engine change cannot pass the source compatibility gate."""
+    """仅变更引擎版本也必须被源代码兼容性关卡拦截。"""
     original = metadata.version
     before = _implementation_digest()
 

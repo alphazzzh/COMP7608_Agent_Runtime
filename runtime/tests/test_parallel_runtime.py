@@ -1,10 +1,9 @@
-"""Public-run acceptance tests for bounded, auditable tool-plan waves.
+"""通过公开 run 入口验收有界且可审计的工具计划批次。
 
-The fixtures use independent synthetic sources and local ports only. Explicit
-event gates prove overlap, reverse completion, draining and cancellation; test
-timeouts only bound a broken implementation and never measure performance.
-Trace events and artifact contents check the serial commit boundary separately
-from the raw adapter workers. No controller-private methods are exercised.
+测试替身仅使用相互独立的合成数据源与本地端口。显式事件关卡验证并行重叠、
+逆序完成、等待任务结束和取消；超时仅用于限制缺陷实现的等待，不衡量性能。
+轨迹事件与产物内容单独验证串行提交边界，将其与原始适配器工作任务区分。
+所有测试均不调用控制器私有方法。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from lake_agent.runtime import run
 
 
 class MemoryTrace:
-    """Record committed events/artifacts and inspect adapters at trace close."""
+    """记录已提交的事件和产物，并在关闭轨迹时检查适配器。"""
 
     def __init__(self):
         self.events = []
@@ -46,7 +45,7 @@ class MemoryTrace:
 
 
 class SourceData:
-    """Read-only source fixtures with explicitly controlled raw worker lifetimes."""
+    """只读数据源测试替身，显式控制原始工作任务的生命周期。"""
 
     def __init__(self, *, held=(), errors=None, before_invoke=None):
         self.sources = [
@@ -72,7 +71,7 @@ class SourceData:
         self.peak = 0
 
     def event(self, collection, step_id):
-        """Reuse stable per-step gates, including across retry attempts."""
+        """复用每个步骤的稳定事件关卡，包括跨重试尝试的复用。"""
         return collection.setdefault(step_id, asyncio.Event())
 
     def tool_specs(self):
@@ -114,7 +113,7 @@ class SourceData:
         )
 
     async def invoke(self, request):
-        """Only this adapter body is concurrent; controller state stays outside."""
+        """只有此适配器函数体并发执行；控制器状态在其外部管理。"""
         self.invocations.append(request)
         self.active.add(request.call_id)
         self.children.add(asyncio.current_task())
@@ -154,7 +153,7 @@ class SourceData:
 
 
 class RecordingContent(DemoContent):
-    """Retain full compose inputs independently of planner context previews."""
+    """独立于规划上下文预览，保留完整的 compose 输入。"""
 
     def __init__(self):
         super().__init__()
@@ -166,7 +165,7 @@ class RecordingContent(DemoContent):
 
 
 class PlanOnce(DemoPlanner):
-    """Offer one accepted plan, then finish using the controller's observations."""
+    """先提供一个可接受的计划，再使用控制器观测完成任务。"""
 
     def __init__(self, steps):
         self.steps = steps
@@ -185,7 +184,7 @@ class PlanOnce(DemoPlanner):
 
 
 def step(step_id, source="source-1", *, tool="read", depends_on=()):
-    """Give actions stable identities and distinct authorized argument signatures."""
+    """为动作分配稳定身份，以及彼此不同且已授权的参数签名。"""
     args = {"label": step_id}
     if source is not None:
         args["source_id"] = source
@@ -201,7 +200,7 @@ def step(step_id, source="source-1", *, tool="read", depends_on=()):
 
 
 async def execute(steps, *, data=None, trace=None, content=None, planner=None, **config):
-    """Drive the supported public entry point with deterministic local ports."""
+    """使用确定性的本地端口驱动受支持的公开入口。"""
     data = data if data is not None else SourceData()
     trace = trace if trace is not None else MemoryTrace()
     trace.data = data
@@ -221,7 +220,7 @@ async def execute(steps, *, data=None, trace=None, content=None, planner=None, *
 
 @asynccontextmanager
 async def running(steps, **kwargs):
-    """Ensure a failed gate assertion cannot leave the run or its children alive."""
+    """确保关卡断言失败时，不会遗留仍在运行的主任务或子任务。"""
     task = asyncio.create_task(execute(steps, **kwargs))
     try:
         yield task
@@ -233,7 +232,7 @@ async def running(steps, **kwargs):
 
 
 async def wait_event(event):
-    """Bound regressions without depending on adapter completion speed."""
+    """为回归测试设置等待上限，不依赖适配器的完成速度。"""
     async with asyncio.timeout(2):
         await event.wait()
 
@@ -260,7 +259,7 @@ def terminal_states(trace):
 
 
 def test_parallel_configuration_and_safe_metadata_contract():
-    """Concurrency stays explicitly bounded and existing tools default to serial."""
+    """并发始终受到显式限制，现有工具默认串行执行。"""
     assert m.RunConfig().max_parallel_tool_calls == 4
     spec = m.ToolSpec(
         name="read",
@@ -279,7 +278,7 @@ def test_parallel_configuration_and_safe_metadata_contract():
 
 
 async def test_safe_disjoint_sources_overlap_and_respect_configured_cap():
-    """Two held workers must coexist before either can release the third wave."""
+    """两个受阻的工作任务必须同时存在，之后才允许启动第三个任务所在的批次。"""
     data = SourceData(held={"a", "b", "c"})
     steps = [step("a"), step("b", "source-2"), step("c", "source-3")]
     async with running(steps, data=data, max_parallel_tool_calls=2) as task:
@@ -287,7 +286,7 @@ async def test_safe_disjoint_sources_overlap_and_respect_configured_cap():
         await wait_event(data.event(data.started, "b"))
         assert len(data.active) == data.peak == 2
         assert not data.event(data.started, "c").is_set()
-        # A wave drains completely: one returned sibling cannot open a slot.
+        # 整个批次必须全部结束：同批单个任务返回后，不能提前腾出名额。
         data.event(data.releases, "b").set()
         await wait_event(data.event(data.finished, "b"))
         assert not data.event(data.started, "c").is_set()
@@ -301,7 +300,7 @@ async def test_safe_disjoint_sources_overlap_and_respect_configured_cap():
 
 
 async def test_reverse_worker_completion_commits_evidence_in_selected_plan_order():
-    """Adapter return order cannot change trace, observation or compose ordering."""
+    """适配器返回顺序不能改变轨迹、观测或 compose 输入的顺序。"""
     data, trace, content = SourceData(held={"first", "second"}), MemoryTrace(), RecordingContent()
     steps = [step("first"), step("second", "source-2")]
     planner = PlanOnce(steps)
@@ -326,7 +325,7 @@ async def test_reverse_worker_completion_commits_evidence_in_selected_plan_order
         "first",
         "second",
     ]
-    # Working context deliberately presents committed observations newest first.
+    # 工作上下文刻意按从新到旧的顺序提供已提交观测。
     assert [item["step_id"] for item in planner.requests[-1].tool_observations] == [
         "second",
         "first",
@@ -338,7 +337,7 @@ async def test_dependency_waits_for_parent_audit_evidence_and_entire_wave_drain(
 
     async def check_child(request):
         if request.step_id == "child":
-            # A committed artifact and evidence event must precede dispatch.
+            # 派发之前，必须先提交产物与证据事件。
             for parent in ("parent", "sibling"):
                 event = next(
                     item
@@ -413,7 +412,7 @@ async def test_parallel_budget_reservations_never_overshoot_physical_data_cap():
     data = SourceData(held={"a", "b"})
     trace = MemoryTrace()
     steps = [step("a"), step("b", "source-2"), step("c", "source-3")]
-    # One catalog request plus two tool requests exactly consumes this cap.
+    # 一次目录请求加两次工具请求恰好耗尽此上限。
     async with running(
         steps, data=data, trace=trace, max_parallel_tool_calls=3, max_data_calls=3
     ) as task:
@@ -458,7 +457,7 @@ async def test_parallel_retry_reuses_logical_operation_and_counts_physical_attem
 
 
 async def test_retry_budget_exhaustion_still_commits_successful_started_sibling():
-    """A retry denied at the physical cap cannot discard another worker's reply."""
+    """因实际请求次数上限而被拒绝的重试，不能丢弃同批另一工作任务的回复。"""
     data = SourceData(
         held={"a", "b"},
         errors={("a", 1): m.ErrorInfo(code="unavailable", message="Retry wanted", retryable=True)},
@@ -563,7 +562,7 @@ async def test_cancelling_parallel_wave_observes_every_child_before_trace_close(
 
 
 async def test_cancellation_during_second_wave_intent_preserves_all_pending_identities():
-    """Atomic wave preparation exposes committed and uncertain intent reservations."""
+    """批次的原子准备过程应暴露已提交及提交状态不确定的调用意图预留。"""
     entered = asyncio.Event()
 
     class HeldSecondIntent(MemoryTrace):
@@ -601,7 +600,7 @@ async def test_cancellation_during_second_wave_intent_preserves_all_pending_iden
 
 
 async def test_competing_retries_use_final_slot_in_stable_order_without_discarding_it():
-    """Atomic preparation must not reserve a retry it cannot dispatch."""
+    """原子准备过程不得为无法派发的重试预留额度。"""
     error = m.ErrorInfo(code="unavailable", message="Transient", retryable=True)
     data = SourceData(errors={("a", 1): error, ("b", 1): error})
     trace = MemoryTrace()
@@ -630,7 +629,7 @@ async def test_competing_retries_use_final_slot_in_stable_order_without_discardi
 
 
 async def test_planner_request_mutation_cannot_grant_adapter_parallel_permission():
-    """Planner-owned request records cannot rewrite trusted concurrency claims."""
+    """规划器拥有的请求记录不能改写可信的并发能力声明。"""
 
     class UnsafeData(SourceData):
         def tool_specs(self):
@@ -660,7 +659,7 @@ async def test_planner_request_mutation_cannot_grant_adapter_parallel_permission
 
 
 async def test_cancellation_during_first_result_write_preserves_all_buffered_replies():
-    """A returned sibling stays known even before its ordered commit is reached."""
+    """同批任务已经返回的结果，即使尚未轮到按序提交，也仍属于已知结果。"""
     entered = asyncio.Event()
 
     class HeldResultTrace(MemoryTrace):
@@ -691,7 +690,7 @@ async def test_cancellation_during_first_result_write_preserves_all_buffered_rep
 
 
 async def test_parallel_observation_write_failure_stops_new_dispatch_and_drains_workers():
-    """An audit failure cannot leak tasks or admit another source read."""
+    """审计故障不能泄漏任务，也不能放行另一次数据源读取。"""
 
     class BrokenObservationTrace(MemoryTrace):
         async def append(self, event):
@@ -714,7 +713,7 @@ async def test_parallel_observation_write_failure_stops_new_dispatch_and_drains_
 
 
 async def test_fatal_sibling_prevents_new_retry_after_all_started_results_settle():
-    """A retriable sibling does not dispatch again after a fatal wave decision."""
+    """批次作出致命故障决策后，同批可重试的任务不得再次派发。"""
     data = SourceData(
         errors={
             ("a", 1): m.ErrorInfo(code="busy", message="Transient", retryable=True),

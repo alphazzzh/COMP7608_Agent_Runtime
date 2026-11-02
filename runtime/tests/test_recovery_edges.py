@@ -1,9 +1,8 @@
-"""Recovery boundaries that require more than a single cancelled execution.
+"""需要多次取消执行才能验证的恢复边界。
 
-These acceptance tests keep SQLite and audit files real, inject faults only at
-public storage/trace methods, and rebuild with new port instances. The version
-compatibility check imports a temporary source copy in a child interpreter so
-the working tree and the parent interpreter remain untouched.
+这些验收测试保留真实 SQLite 与审计文件，只在公开存储或轨迹方法处注入故障，
+并使用新的端口实例重建运行。版本兼容性检查在子解释器中导入临时源代码副本，
+因此不会修改工作树或父解释器。
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 class FrontierTrace(JsonlTraceSink):
-    """Pause a newly executed event while allowing historical events to replay."""
+    """暂停新执行产生的事件，同时允许历史事件重放。"""
 
     def __init__(self, root, event_type):
         super().__init__(root)
@@ -53,7 +52,7 @@ class FrontierTrace(JsonlTraceSink):
 
 
 class FailingCallStore(SqliteStateStore):
-    """Fail one public tool-ledger write, before or after its real SQLite commit."""
+    """使一次公开工具调用账本写入在真实 SQLite 提交之前或之后失败。"""
 
     def __init__(self, path, *, boundary, after_commit):
         super().__init__(path)
@@ -79,7 +78,7 @@ class FailingCallStore(SqliteStateStore):
 
 
 class FailingToolResultTrace(JsonlTraceSink):
-    """Refuse the first returned tool-result artifact, before writing any bytes."""
+    """拒绝第一个已返回工具结果的产物，且不写入任何字节。"""
 
     def __init__(self, root):
         super().__init__(root)
@@ -98,7 +97,7 @@ class FailingToolResultTrace(JsonlTraceSink):
 
 
 async def test_multiple_interruptions_rebind_each_fresh_content_instance(tmp_path):
-    """Auxiliary rebind history cannot change IDs, replay calls, or reset counts."""
+    """辅助重新绑定的历史不能改变 ID、重放调用或重置计数。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     adapters = []
     interrupted = []
@@ -159,7 +158,7 @@ async def test_multiple_interruptions_rebind_each_fresh_content_instance(tmp_pat
         1,
     )
     assert (result.call_counts.planner, result.call_counts.model_calls) == (3, 3)
-    assert result.call_counts.content == 8  # Five ordinary calls, three local rebinds.
+    assert result.call_counts.content == 8  # 五次普通调用，三次本地重新绑定。
     assert (result.usage.input_tokens, result.usage.output_tokens) == (21, 9)
     assert sum(len(d.catalog_requests) for d, _, _ in adapters) == 1
     assert sum(len(d.tool_requests) for d, _, _ in adapters) == 1
@@ -191,7 +190,7 @@ async def test_multiple_interruptions_rebind_each_fresh_content_instance(tmp_pat
 async def test_storage_failure_freezes_dispatch_and_recovers_only_known_outcomes(
     tmp_path, boundary, after_commit
 ):
-    """Only durable evidence of no dispatch or a valid reply permits continuation."""
+    """只有持久化记录能证明未派发调用或已取得有效回复时，才允许继续。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     store = FailingCallStore(state_path, boundary=boundary, after_commit=after_commit)
     data, content, planner = RecordingData(), RecordingContent(), RecordingPlanner()
@@ -218,8 +217,8 @@ async def test_storage_failure_freezes_dispatch_and_recovers_only_known_outcomes
     data, content, planner = RecordingData(), RecordingContent(), RecordingPlanner()
     restarted = SqliteStateStore(state_path)
     try:
-        # An intent persisted without a reply is unknown even when the test
-        # knows the injected failure occurred before the actual adapter body.
+        # 若意图已持久化却没有回复，结果便属于未知，即使测试知道
+        # 所注入的故障发生在真正进入适配器函数体之前。
         unknown = (boundary == "begin" and after_commit) or (
             boundary == "finish" and not after_commit
         )
@@ -254,7 +253,7 @@ async def test_storage_failure_freezes_dispatch_and_recovers_only_known_outcomes
 
 
 async def test_valid_reply_survives_failure_writing_its_trace_artifact(tmp_path):
-    """The journal must own the reply before a fallible audit-result write starts."""
+    """在可能失败的审计结果写入开始前，调用日志必须已经持久化保存回复。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     store = SqliteStateStore(state_path)
     data = RecordingData()
@@ -303,7 +302,7 @@ async def test_valid_reply_survives_failure_writing_its_trace_artifact(tmp_path)
 
 
 async def test_runtime_source_change_refuses_recovery_in_fresh_interpreter(tmp_path):
-    """An implementation change must not silently consume an old call journal."""
+    """实现发生变化后，不能静默沿用旧的调用日志。"""
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
     store = SqliteStateStore(state_path)
     trace = FrontierTrace(trace_root, "evidence.added")
@@ -328,8 +327,8 @@ async def test_runtime_source_change_refuses_recovery_in_fresh_interpreter(tmp_p
         isolated_package,
         ignore=shutil.ignore_patterns("__pycache__"),
     )
-    # A harmless source difference still changes the strict implementation
-    # identity; no private digest helper or persisted state schema is patched.
+    # 即使源代码差异无害，也会改变严格的实现身份；
+    # 不修改私有摘要辅助函数或持久化状态模式。
     with (isolated_package / "runtime.py").open("a") as changed:
         changed.write("\n# Deliberately different runtime build for compatibility acceptance.\n")
     program = """

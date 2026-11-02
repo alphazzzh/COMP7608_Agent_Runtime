@@ -1,17 +1,15 @@
-"""One explicitly opted-in live acceptance of safe parallel tool execution.
+"""仅在显式启用后，执行一次安全并行工具调用的在线验收。
 
-Only JsonPlanner uses the remote model. DataPort and ContentPort are SYNTHETIC
-local fixtures; this script establishes controller behavior, not retrieval or
-answer quality. One subtask must produce one plan containing two independent
-extract calls, then finish. An event gate inside invoke requires both workers
-to be active together; sequential execution fails after at most five seconds.
+只有 JsonPlanner 使用远程模型。DataPort 和 ContentPort 是本地合成测试替身；
+本脚本验证控制器行为，不验证检索或答案质量。单个子任务必须生成一个计划，
+其中含两个独立的 extract 调用，然后结束。invoke 内的事件同步点要求两个
+工作任务同时处于活动状态；串行执行最迟会在五秒后失败。
 
-Run from project/runtime with ``.venv/bin/python scripts/live_parallel_acceptance.py
---live``. Credentials reuse the authorized environment/Keychain helper and are
-never printed or deliberately persisted. There is one run, at most six HTTP
-requests, no HTTP redirect/retry, and no data retry. Ordinary failures and user
-interruption still produce a sanitized report; an OS kill or unwritable output
-directory cannot guarantee one. Offline callers may inject a MockTransport.
+从 project/runtime 运行 ``.venv/bin/python scripts/live_parallel_acceptance.py
+--live``。凭据复用已获授权的环境变量/Keychain 辅助函数，绝不打印或有意持久化。
+只执行一次运行，最多发起六次 HTTP 请求，不进行 HTTP 重定向或重试，也不重试数据操作。
+普通失败和用户中断仍会生成经脱敏的报告；操作系统强制终止或输出目录不可写时，
+无法保证生成报告。离线调用方可以注入 MockTransport。
 """
 
 from __future__ import annotations
@@ -45,7 +43,7 @@ FIXTURE_TIMEOUT_SECONDS = 5
 
 
 class SyntheticData:
-    """Two independent, read-only sources with a bounded overlap rendezvous."""
+    """两个独立的只读数据源，带有等待时限的重叠执行同步点。"""
 
     def __init__(self) -> None:
         self.sources = [
@@ -68,7 +66,7 @@ class SyntheticData:
         self.gate = asyncio.Event()
 
     def tool_specs(self) -> list[m.ToolSpec]:
-        """Opt only the ordinary extract schema into source-disjoint parallelism."""
+        """仅允许普通 extract 模式在数据源互不冲突时并行执行。"""
         return [
             m.ToolSpec(
                 name="extract",
@@ -83,7 +81,7 @@ class SyntheticData:
         ]
 
     async def catalog(self, request: m.CatalogRequest) -> m.CatalogResult:
-        """Expose both sources in one frozen local catalog page."""
+        """在单页冻结的本地目录中公开两个数据源。"""
         self.catalog_calls += 1
         return m.CatalogResult(
             call_id=request.call_id,
@@ -92,11 +90,10 @@ class SyntheticData:
         )
 
     async def invoke(self, request: m.ToolRequest) -> m.ToolResult:
-        """Release both extracts only after their actual worker bodies overlap.
+        """仅在两个提取工作任务的函数体实际重叠执行后，才允许二者继续。
 
-        State updates before the first await are atomic on this event loop. No
-        lock or background timer task is needed. The controller owns/drains the
-        workers; the fixture retains task references only to audit their exit.
+        首次 await 之前的状态更新在此事件循环上是原子的，无需锁或后台定时任务。
+        控制器持有工作任务并等待其收尾；测试替身保留任务引用，仅用于审计其是否已退出。
         """
         self.invocations.append(request)
         self.active.add(request.call_id)
@@ -142,10 +139,10 @@ class SyntheticData:
 
 
 class SyntheticContent(DemoContent):
-    """Local fixture catalog/search, composition and verification; no inference."""
+    """在本地模拟目录、搜索、答案组织与校验，不进行模型推理。"""
 
     async def compose(self, request: m.ComposeRequest) -> m.ModuleResult[m.AnswerRecord]:
-        """Cite all actual controller-owned evidence and visibly label its scope."""
+        """引用控制器实际持有的全部证据，并显著标明答案的适用范围。"""
         if not request.evidence:
             raise ValueError("Synthetic composition requires controller-owned evidence.")
         return m.ModuleResult(
@@ -159,7 +156,7 @@ class SyntheticContent(DemoContent):
         )
 
     async def verify(self, request: m.VerifyRequest) -> m.ModuleResult[m.Verification]:
-        """Check fixture provenance only; this is explicitly not factual verification."""
+        """只检查合成测试数据的来源，明确不作事实核验。"""
         supported = (
             len(request.evidence) == 2
             and len({item.source_id for item in request.evidence}) == 2
@@ -178,7 +175,7 @@ class SyntheticContent(DemoContent):
 
 
 class CountingTransport(httpx.AsyncBaseTransport):
-    """Count physical requests without retaining headers, prompts or responses."""
+    """统计实际请求次数，不保留请求头、提示词或响应。"""
 
     def __init__(
         self, max_requests: int, *, delegate: httpx.AsyncBaseTransport | None = None
@@ -191,7 +188,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
         self.blocked_requests = 0
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        """Record failed dispatches as well as received HTTP responses."""
+        """同时记录失败的请求派发与已收到的 HTTP 响应。"""
         if len(self.attempts) >= self.max_requests:
             self.blocked_requests += 1
             raise httpx.RequestError("Acceptance HTTP request budget exhausted.", request=request)
@@ -210,19 +207,19 @@ class CountingTransport(httpx.AsyncBaseTransport):
         try:
             response = await self.delegate.handle_async_request(request)
         except BaseException:
-            # Exception messages may contain request headers or provider bodies.
+            # 异常消息可能包含请求头或服务商响应正文。
             record["transport_failed"] = True
             raise
         record["http_status"] = response.status_code
         return response
 
     async def aclose(self) -> None:
-        """Close the underlying transport even if credential lookup failed."""
+        """即使凭据查询失败，也关闭底层传输器。"""
         await self.delegate.aclose()
 
 
 def source_hashes() -> dict[str, str]:
-    """Reuse the harness manifest and add this script and parallel test sources."""
+    """复用执行框架的源码清单，并纳入本脚本与并行测试源码。"""
     hashes = harness_source_hashes()
     paths = [Path(__file__).resolve(), RUNTIME_ROOT / "tests" / "test_execution.py"]
     paths.extend(sorted((RUNTIME_ROOT / "tests").glob("test_parallel*.py")))
@@ -232,7 +229,7 @@ def source_hashes() -> dict[str, str]:
 
 
 def new_report(args: argparse.Namespace) -> dict:
-    """Initialize a failure-safe report before any credential or network access."""
+    """在访问凭据或网络之前，初始化即使失败也可保留的报告。"""
     return {
         "created_at": datetime.now(UTC).isoformat(),
         "scope": "Real JsonPlanner; SYNTHETIC local DataPort and ContentPort; parallel control only.",
@@ -280,7 +277,7 @@ async def execute(
     *,
     transport: CountingTransport | None = None,
 ) -> None:
-    """Execute one bounded controller run; an injected transport stays offline."""
+    """执行一次预算受限的控制器运行；注入离线传输器时保持离线。"""
     data = SyntheticData()
     transport = transport if transport is not None else CountingTransport(args.max_requests)
     report["http_attempts"] = transport.attempts
@@ -323,7 +320,7 @@ async def execute(
     )
     report["run_config"] = request.config.model_dump(mode="json")
     try:
-        # The CLI checks --live before reaching this authorized credential helper.
+        # 命令行入口会先检查 --live，再调用此已获授权的凭据辅助函数。
         secret = read_credential(BASE_URL)
         async with httpx.AsyncClient(transport=transport, follow_redirects=False) as client:
             async with JsonPlanner(BASE_URL, secret, client=client) as planner:
@@ -365,7 +362,7 @@ async def execute(
 
 
 def finalize_checks(report: dict, output: Path) -> None:
-    """Audit persisted plans, ordering, evidence ownership and physical accounting."""
+    """审计持久化计划、执行顺序、证据归属及实际请求计数。"""
     audit, artifacts, events = inspect_trace(
         output / "runs" / report["run_id"] / "events.jsonl", report["run_id"]
     )
@@ -481,7 +478,7 @@ def finalize_checks(report: dict, output: Path) -> None:
 
 
 def main() -> None:
-    """Require explicit live opt-in and always persist a sanitized final report."""
+    """要求显式启用在线执行，并始终持久化经脱敏的最终报告。"""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

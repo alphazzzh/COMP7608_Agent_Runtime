@@ -1,8 +1,7 @@
-"""Review regressions for optional imports and the recovery-to-live boundary.
+"""可选导入与恢复后转入新执行边界的审查回归测试。
 
-Tests use public run/resume APIs, real temporary storage, and the existing
-recording fixtures. Cancellation and audit gates model interruptions without
-editing checkpoints or depending on controller implementation details.
+测试使用公开的 run/resume 接口、真实临时存储和现有记录型测试替身。
+取消与审计关卡用于模拟中断，不编辑检查点，也不依赖控制器实现细节。
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 def test_ordinary_runtime_import_does_not_require_posix_state_backend():
-    """Importing ordinary run must work where the optional fcntl is absent."""
+    """缺少可选 fcntl 模块时，普通 run 接口仍必须可以导入。"""
     script = textwrap.dedent(
         """
         import builtins
@@ -56,7 +55,7 @@ def test_ordinary_runtime_import_does_not_require_posix_state_backend():
 
 
 async def _interrupt_known_run(store, trace_root, *, event_type, req=None):
-    """Leave a journal of known calls and an interrupted audit continuation."""
+    """留下包含已知调用的日志，并在后续审计过程被中断时停止。"""
     trace = InterruptingTrace(trace_root, event_type=event_type)
     task = asyncio.create_task(
         run(
@@ -73,7 +72,7 @@ async def _interrupt_known_run(store, trace_root, *, event_type, req=None):
 
 @pytest.mark.parametrize("invalid_reply", [False, True])
 async def test_swallowed_rebind_cancellation_blocks_new_frontier_calls(tmp_path, invalid_reply):
-    """A local registration cannot swallow caller cancellation and resume work."""
+    """本地注册不能吞掉调用方的取消信号并继续执行。"""
 
     class SuppressingContent(RecordingContent):
         def __init__(self):
@@ -85,8 +84,8 @@ async def test_swallowed_rebind_cancellation_blocks_new_frontier_calls(tmp_path,
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
-                # A deliberately broken adapter exercises the controller's
-                # obligation to preserve cancellation at this extra boundary.
+                # 故意使用有缺陷的适配器，验证控制器在这一额外边界
+                # 仍有责任保留取消信号。
                 if invalid_reply:
                     return {"call_id": req.call_id, "status": "invalid"}
                 return await super().prepare_catalog(req)
@@ -124,12 +123,12 @@ async def test_swallowed_rebind_cancellation_blocks_new_frontier_calls(tmp_path,
 
 
 async def test_frontier_planner_gets_remaining_wall_time_after_rebind(tmp_path):
-    """New planner budgets must reflect local registration and original expiry."""
+    """新规划请求的预算必须反映本地注册消耗，以及原始到期时间。"""
 
     class DelayedContent(RecordingContent):
         async def prepare_catalog(self, req):
-            # Simulate index reconstruction work. The assertion compares two
-            # request fields and has no machine-speed or elapsed-time threshold.
+            # 模拟索引重建工作。断言比较两个请求字段，
+            # 不使用机器速度或经过时间的阈值。
             await asyncio.sleep(0.05)
             return await super().prepare_catalog(req)
 
@@ -155,25 +154,25 @@ async def test_frontier_planner_gets_remaining_wall_time_after_rebind(tmp_path):
         assert result.status == "completed"
         assert planner.selections
         frontier = planner.selections[0]
-        # Both bounds use the same global expiry because the per-call maximum
-        # equals the original whole-run allowance. Integer floor/ceiling gives
-        # wall_time_ms <= timeout_ms after the recovery boundary is crossed.
+        # 单次调用上限等于原始整次运行额度，因此两个边界均使用相同的全局到期时间。
+        # 跨过恢复边界后，整数向下或向上取整使得
+        # 剩余时长满足 wall_time_ms <= timeout_ms。
         assert frontier.budget_remaining.wall_time_ms <= frontier.timeout_ms
     finally:
         await store.aclose()
 
 
 async def test_expired_auxiliary_intent_never_dispatches_registration(tmp_path):
-    """Durable admission time can exhaust expiry before adapter entry."""
+    """持久化准入过程可能在进入适配器前耗尽剩余时间。"""
     resume, Store, _ = recovery_api()
 
     class SlowAuxiliaryIntentStore(Store):
         async def begin_call(self, lease, call_id, value):
             await super().begin_call(lease, call_id, value)
             if value.get("auxiliary"):
-                # Represent slow durable storage after the original deadline
-                # check. A timeout context with a past expiry cannot by itself
-                # stop synchronous adapter entry before the next event-loop tick.
+                # 模拟原始截止时间检查之后的慢速持久化存储。
+                # 仅靠已经到期的超时上下文，无法在下一次事件循环调度前
+                # 阻止同步进入适配器。
                 await asyncio.sleep(1.05)
 
     store = SlowAuxiliaryIntentStore(tmp_path / "state.db")
@@ -203,7 +202,7 @@ async def test_expired_auxiliary_intent_never_dispatches_registration(tmp_path):
 
 
 async def test_frontier_tool_gets_fresh_call_window_after_registration(tmp_path):
-    """A separate recovery registration cannot consume a new tool's timeout."""
+    """独立的恢复注册过程不能占用新工具调用的超时额度。"""
 
     class DelayedContent(RecordingContent):
         async def prepare_catalog(self, req):
@@ -223,8 +222,8 @@ async def test_frontier_tool_gets_fresh_call_window_after_registration(tmp_path)
         max_retries_per_data_operation=0,
     )
     try:
-        # No tool adapter or durable tool intent exists at this audit gate.
-        # Recovery therefore reaches its first new I/O at tool-wave admission.
+        # 在这一审计关卡尚无工具适配器调用，也无持久化工具意图。
+        # 因此，恢复过程在工具批次准入时才抵达首次新 I/O。
         await _interrupt_known_run(
             store, tmp_path / "traces", event_type="tool.call.started", req=req
         )
@@ -237,8 +236,8 @@ async def test_frontier_tool_gets_fresh_call_window_after_registration(tmp_path)
             planner=planner,
             trace=JsonlTraceSink(tmp_path / "traces"),
         )
-        # Each operation takes less than its independent half-second limit.
-        # Their sum exceeds one limit and exposes a window started before rebind.
+        # 每项操作均短于各自独立的半秒上限。
+        # 两者总和超过单个上限，从而暴露在重新绑定前就开始计时的超时窗口。
         assert (result.status, result.stop_reason) == ("completed", "verified_supported")
         assert len(data.tool_requests) == 1
         assert len(content.preparations) == 1
@@ -248,7 +247,7 @@ async def test_frontier_tool_gets_fresh_call_window_after_registration(tmp_path)
 
 
 async def test_caller_cancellation_survives_durable_release_failure(tmp_path):
-    """A secondary storage error cannot replace the caller's cancellation."""
+    """后续存储错误不能替换调用方的取消信号。"""
     _, Store, StateStoreError = recovery_api()
 
     class ReleaseFailingStore(Store):
@@ -275,8 +274,8 @@ async def test_caller_cancellation_survives_durable_release_failure(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=3)
         assert task.cancelled()
-        # release already unlocked before raising. A new lease can be acquired
-        # even though its failed cleanup must not obscure the original cancel.
+        # release 在抛出异常前已经解锁，因此仍可取得新租约；
+        # 清理失败也不能掩盖原始取消。
         lease = await store.acquire("recoverable-run")
         with pytest.raises(StateStoreError):
             await store.release(lease)

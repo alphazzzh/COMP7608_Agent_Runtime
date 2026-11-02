@@ -1,8 +1,8 @@
-"""Independent regressions for project adapter cleanup after durable completion.
+"""项目适配器在持久化完成之后清理资源的独立回归测试。
 
-The real offline core, SQLite journal, trace and HTTP view remain in the path.
-Only the context owner's final cleanup fails or waits: a terminal core outcome
-must remain available when that later resource lifecycle step is interrupted.
+测试仍经过真实的离线核心、SQLite 调用日志、轨迹和 HTTP 视图。
+仅让上下文所有者的最终清理失败或等待：后续资源生命周期步骤被中断时，
+核心已经终结的结果必须仍然可用。
 """
 
 import asyncio
@@ -20,13 +20,13 @@ from lake_agent.web.storage import WebError
 
 @pytest.mark.parametrize("cleanup", ["error", "cancel"])
 async def test_adapter_cleanup_preserves_already_committed_terminal_result(tmp_path, cleanup):
-    """Late cleanup cannot erase a completed answer or advertise resumable work."""
+    """后置清理不能抹掉已完成的答案，也不能声称该任务仍可恢复。"""
     cleanup_entered, cleanup_release = asyncio.Event(), asyncio.Event()
 
     @asynccontextmanager
     async def owned_ports():
-        # Every attempt receives genuine fresh local adapters. The test gate
-        # belongs only to teardown, after run() has durably returned its result.
+        # 每次尝试都获得真实且全新的本地适配器。测试关卡只作用于清理阶段，
+        # 此时 run() 已将结果持久化并返回。
         try:
             yield ExecutionPorts(data=DemoData(), content=DemoContent(), planner=DemoPlanner())
         finally:
@@ -69,8 +69,8 @@ async def test_adapter_cleanup_preserves_already_committed_terminal_result(tmp_p
             try:
                 async with asyncio.timeout(5):
                     await cleanup_entered.wait()
-                # Verify the durable outcome before triggering cancellation;
-                # this distinguishes late cleanup from an unfinished task.
+                # 触发取消前先验证持久化结果，
+                # 从而区分后置清理与尚未完成的任务。
                 lease = await service.state_store.acquire(run_id)
                 try:
                     saved = await service.state_store.load(lease)
@@ -95,11 +95,11 @@ async def test_adapter_cleanup_preserves_already_committed_terminal_result(tmp_p
 
 
 async def test_repository_does_not_publish_a_report_larger_than_its_read_limit(tmp_path):
-    """A direct import cannot create a valid record that poisons all later reads."""
+    """直接导入不能创建表面有效、却会破坏所有后续读取的记录。"""
     repository = EvaluationRepository(tmp_path)
     await repository.start()
-    # Python accepts arbitrarily long fractional seconds. The HTTP limit is
-    # independent of the public repository's promise to create readable files.
+    # Python 接受任意长的小数秒。HTTP 大小限制独立于
+    # 公开仓库关于创建可读文件的契约。
     value = {
         "title": "Oversize timestamp",
         "dataset_id": "review-data",
@@ -109,8 +109,8 @@ async def test_repository_does_not_publish_a_report_larger_than_its_read_limit(t
         "evaluated_at": "2026-11-02T08:30:00." + "1" * 300_000 + "+08:00",
         "results": [{"mode": "full_agent", "task_count": 1}],
     }
-    # Either the strict import model or the repository may reject the size;
-    # neither may publish an unreadable file and report a successful create.
+    # 严格导入模型或仓库均可拒绝该大小；
+    # 两者都不能发布无法读取的文件后仍报告创建成功。
     with pytest.raises((ValueError, WebError)):
         await repository.create(EvaluationImport.model_validate(value))
     assert await repository.listing() == []

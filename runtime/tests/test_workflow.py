@@ -1,8 +1,7 @@
-"""Offline migration gates for real LangGraph routing and public runtime behavior.
+"""真实 LangGraph 路由与公开运行时行为的离线迁移验收关卡。
 
-Resolve the new workflow module inside each structural test so its initial RED
-does not prevent the existing public-run regressions from being collected.
-Adapters remain local fixtures; no model provider or network access is involved.
+每个结构测试均在内部解析新的工作流模块，避免其初始失败阻断现有公开 run 回归测试的收集。
+适配器仍使用本地测试替身，不涉及模型提供方或网络访问。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from lake_agent.runtime import _Controller, run
 
 
 class MemoryTrace:
-    """Record real commits and expose any write after the sink was closed."""
+    """记录真实提交，并暴露接收器关闭之后发生的任何写入。"""
 
     def __init__(self):
         self.events = []
@@ -50,7 +49,7 @@ class MemoryTrace:
 
 
 class RecordingContent(DemoContent):
-    """Inspect final consumer inputs rather than bounded planner previews."""
+    """检查最终消费者的输入，不依赖有界的规划器预览。"""
 
     def __init__(self):
         super().__init__()
@@ -72,12 +71,12 @@ class RecordingContent(DemoContent):
 
 
 def local_reply(request, data):
-    """Local modules release their provisional model-request reservation."""
+    """本地模块释放其临时预留的模型请求额度。"""
     return m.ModuleResult(call_id=request.call_id, data=data, usage=m.Usage.local())
 
 
 def request(*, mode="full_agent", run_id=None, question="Annual revenue?", **limits):
-    """Use explicit finite allowances so graph limits cannot hide runaway work."""
+    """使用显式有限额度，防止图执行限制掩盖失控的工作量。"""
     return m.RunRequest(
         task_id="workflow-regression",
         run_id=run_id,
@@ -88,7 +87,7 @@ def request(*, mode="full_agent", run_id=None, question="Annual revenue?", **lim
 
 
 async def wait_for_gate(task, gate):
-    """Surface early runtime failures and always observe the temporary waiter."""
+    """暴露运行时早期故障，并始终获取临时等待任务的最终结果。"""
     waiter = asyncio.create_task(gate.wait())
     try:
         done, _ = await asyncio.wait({task, waiter}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
@@ -103,7 +102,7 @@ async def wait_for_gate(task, gate):
 
 
 async def test_workflow_compiles_real_nodes_for_agent_and_fixed_routes():
-    """A wrapper node around the old monolithic workflow is not a migration."""
+    """仅用一个节点包装旧的单体工作流，不构成真正的迁移。"""
     workflow = importlib.import_module("lake_agent.workflow")
     controller = _Controller(
         request(),
@@ -136,11 +135,11 @@ async def test_workflow_compiles_real_nodes_for_agent_and_fixed_routes():
 
 @pytest.mark.parametrize("mode", ["fixed_retrieval", "no_verifier", "full_agent"])
 async def test_all_modes_keep_evidence_and_terminal_semantics(mode):
-    """Fixed mode bypasses planning; no-verifier bypasses only verification."""
+    """固定模式绕过规划；no-verifier 模式仅绕过验证。"""
     get_config = importlib.import_module("langgraph.config").get_config
 
     class NodeTrace(MemoryTrace):
-        """Read actual node context at committed I/O intent boundaries."""
+        """在已提交的 I/O 意图边界读取真实节点上下文。"""
 
         def __init__(self):
             super().__init__()
@@ -164,8 +163,8 @@ async def test_all_modes_keep_evidence_and_terminal_semantics(mode):
     assert result.call_counts.tools == (2 if mode == "fixed_retrieval" else 1)
     assert result.call_counts.planner == (0 if mode == "fixed_retrieval" else 3)
     assert len(content.verifications) == (1 if mode == "full_agent" else 0)
-    # These are observed graph execution contexts, not source names or mocked
-    # callback counters. A one-node wrapper of the old loop fails this gate.
+    # 这些是观测到的图执行上下文，不是源代码名称或伪造的回调计数器。
+    # 仅用单个节点包装旧循环的实现无法通过此关卡。
     assert trace.call_nodes == (
         ["catalog", "catalog", "fixed_search", "fixed_execute", "fixed_execute", "compose"]
         if mode == "fixed_retrieval"
@@ -188,7 +187,7 @@ async def test_all_modes_keep_evidence_and_terminal_semantics(mode):
 
 
 async def test_ambient_tracing_is_disabled_inside_adapters_and_restored(monkeypatch):
-    """Ambient LangSmith or explicit LangChain tracing cannot receive run inputs."""
+    """环境启用的 LangSmith 或显式 LangChain 追踪均不能收到运行输入。"""
     langsmith = importlib.import_module("langsmith")
     callbacks = importlib.import_module("langchain_core.callbacks")
     tracer_context = importlib.import_module("langchain_core.tracers.context")
@@ -197,7 +196,7 @@ async def test_ambient_tracing_is_disabled_inside_adapters_and_restored(monkeypa
     observed = []
 
     class LocalTracer(callbacks.BaseCallbackHandler):
-        """Keep a tracing regression entirely local, even if auto-enable breaks."""
+        """即使自动启用机制失效，也确保追踪回归测试完全在本地执行。"""
 
         def __init__(self, **kwargs):
             super().__init__()
@@ -218,8 +217,8 @@ async def test_ambient_tracing_is_disabled_inside_adapters_and_restored(monkeypa
             )
             return await super().catalog(req)
 
-    # Replace only the telemetry sink constructor. Real callback configuration,
-    # graph execution and adapter context propagation remain under test.
+    # 仅替换遥测接收器的构造函数。真实回调配置、
+    # 图执行以及适配器上下文传播仍在测试范围内。
     monkeypatch.setattr(tracer_module, "LangChainTracer", LocalTracer)
     ambient = LocalTracer()
     token = tracer_context.tracing_v2_callback_var.set(ambient)
@@ -243,7 +242,7 @@ async def test_ambient_tracing_is_disabled_inside_adapters_and_restored(monkeypa
 
 
 async def test_outer_collect_runs_cannot_collect_graph_and_remains_usable():
-    """A built-in local collector keeps only the caller's explicit outer runs."""
+    """内置本地收集器只保留调用方显式创建的外层运行。"""
     langsmith = importlib.import_module("langsmith")
     tracer_context = importlib.import_module("langchain_core.tracers.context")
     runnable = importlib.import_module("langchain_core.runnables").RunnableLambda
@@ -251,8 +250,8 @@ async def test_outer_collect_runs_cannot_collect_graph_and_remains_usable():
     async def echo(value):
         return value
 
-    # collect_runs is itself local. Explicitly disable LangSmith so ambient
-    # environment settings cannot create a telemetry client during this test.
+    # collect_runs 本身在本地执行。显式禁用 LangSmith，
+    # 避免环境设置在测试期间创建遥测客户端。
     with langsmith.tracing_context(enabled=False, parent=False):
         with tracer_context.collect_runs() as collector:
             before = runnable(echo, name="outer-before")
@@ -269,8 +268,8 @@ async def test_outer_collect_runs_cannot_collect_graph_and_remains_usable():
             assert tracer_context.run_collector_var.get() is collector
             after = runnable(echo, name="outer-after")
             assert await after.ainvoke({"owner": "after"}) == {"owner": "after"}
-            # Asserting collected payloads proves both input isolation and
-            # restoration of actual collection, beyond ContextVar identity.
+            # 断言所收集的载荷，既能证明输入隔离，也能证明真实收集功能已恢复，
+            # 而不仅是验证 ContextVar 身份相同。
             assert [(item.name, item.inputs) for item in collector.traced_runs] == [
                 ("outer-before", {"owner": "before"}),
                 ("outer-after", {"owner": "after"}),
@@ -279,15 +278,15 @@ async def test_outer_collect_runs_cannot_collect_graph_and_remains_usable():
 
 @pytest.mark.parametrize("mode", ["no_verifier", "full_agent"])
 async def test_local_action_loop_exceeds_default_graph_recursion_limit(mode):
-    """Nine search/plan/execute rounds require more than 25 genuine graph steps."""
+    """九轮搜索、规划与执行需要超过 25 个真实图步骤。"""
     rounds = 9
 
     class DistinctData(DemoData):
         async def invoke(self, req):
             reply = await super().invoke(req)
             item = reply.data["evidence"][0]
-            # Distinct arguments, locators and payloads are real independent
-            # actions, rather than repeatedly requesting one deduplicated read.
+            # 不同参数、定位符与载荷代表真实且相互独立的动作，
+            # 并非重复请求同一个会被去重的读取。
             item["payload"] = req.args["query"]
             item["locator"] = {"query": req.args["query"]}
             return reply
@@ -338,7 +337,7 @@ async def test_local_action_loop_exceeds_default_graph_recursion_limit(mode):
 
 
 async def test_local_observation_loop_exceeds_default_graph_recursion_limit():
-    """Read nodes return directly to planning without another search or data call."""
+    """读取节点直接返回规划阶段，不再进行搜索或数据调用。"""
 
     class PagingPlanner(DemoPlanner):
         def __init__(self):
@@ -373,7 +372,7 @@ async def test_local_observation_loop_exceeds_default_graph_recursion_limit():
         trace=trace,
     )
     assert result.status == "completed", result
-    assert len(planner.pages) > 12  # At least 26 read/plan graph transitions.
+    assert len(planner.pages) > 12  # 至少 26 次读取与规划的图状态转换。
     assert json.loads("".join(page["text"] for page in planner.pages)) == (
         "Synthetic fixture: 2024 annual revenue was 120 million HKD."
     )
@@ -386,7 +385,7 @@ async def test_local_observation_loop_exceeds_default_graph_recursion_limit():
 
 
 async def test_concurrent_runs_keep_routing_evidence_and_completion_isolated():
-    """Shared reentrant ports cannot imply shared graph invocation state."""
+    """共享可重入端口不能导致图调用状态共享。"""
     started = {name: asyncio.Event() for name in ("left", "right")}
     releases = {name: asyncio.Event() for name in ("left", "right")}
 
@@ -444,7 +443,7 @@ async def test_concurrent_runs_keep_routing_evidence_and_completion_isolated():
 
 @pytest.mark.parametrize("phase", ["catalog", "tool"])
 async def test_repeated_caller_cancellation_drains_adapter_before_trace_close(phase):
-    """A second caller cancel must not interrupt the graph's owned cleanup task."""
+    """调用方第二次取消不能中断图所拥有的清理任务。"""
     entered, cleanup_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class CleanupData(DemoData):
@@ -462,8 +461,8 @@ async def test_repeated_caller_cancellation_drains_adapter_before_trace_close(ph
                 await asyncio.Future()
             finally:
                 cleanup_entered.set()
-                # Remain finite and cooperative even when a broken owner
-                # forwards repeated cancellation into this cleanup await.
+                # 即使有缺陷的所有者反复将取消传入此清理等待，
+                # 该清理也保持有限且可协作结束。
                 while not release.is_set():
                     try:
                         await release.wait()
@@ -492,8 +491,8 @@ async def test_repeated_caller_cancellation_drains_adapter_before_trace_close(ph
         await wait_for_gate(task, cleanup_entered)
         for _ in range(2):
             task.cancel()
-            # A ready-queue event lets the cancellation request be delivered;
-            # no elapsed-time assumption controls the cleanup interleaving.
+            # 就绪队列中的事件使取消请求得以送达；
+            # 清理过程的交错顺序不依赖经过时间的假设。
             checkpoint = asyncio.Event()
             asyncio.get_running_loop().call_soon(checkpoint.set)
             await checkpoint.wait()

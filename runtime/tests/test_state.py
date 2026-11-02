@@ -1,4 +1,4 @@
-"""Durable state-store contract tests against real SQLite and POSIX file locks."""
+"""基于真实 SQLite 与 POSIX 文件锁的持久化状态存储契约测试。"""
 
 import asyncio
 import hashlib
@@ -12,7 +12,7 @@ import pytest
 
 
 def state_api():
-    """Import in the test body so a missing implementation is a test failure."""
+    """在测试函数体内导入，使缺少实现表现为测试失败。"""
     return importlib.import_module("lake_agent.state")
 
 
@@ -91,7 +91,7 @@ async def test_one_owner_across_instances_and_stale_token_is_rejected(tmp_path):
         with pytest.raises(api.StateStoreError) as stale:
             await first.save(old, {"v": 3})
         assert stale.value.code == "lease_invalid"
-        await first.release(old)  # Repeated old release cannot unlock the new owner.
+        await first.release(old)  # 重复执行旧租约的 release，不能解锁新所有者的租约。
         with pytest.raises(api.StateStoreError):
             await first.acquire("run")
         assert (await second.load(current)).state == {"v": 1}
@@ -252,7 +252,7 @@ async def test_private_files_and_idempotent_close_release_ownership(tmp_path):
 
 
 async def test_cancelled_save_waits_for_sqlite_transaction_before_return(tmp_path):
-    """Cancellation must not leave a background write racing a new lease owner."""
+    """取消后不得遗留与新租约所有者竞争的后台写入任务。"""
     api = state_api()
     path = tmp_path / "state.db"
     store = api.SqliteStateStore(path)
@@ -261,7 +261,7 @@ async def test_cancelled_save_waits_for_sqlite_transaction_before_return(tmp_pat
     blocker.execute("BEGIN IMMEDIATE")
     task = asyncio.create_task(store.save(lease, {"v": 2}))
     try:
-        # The held SQLite writer lock gives the real worker a deterministic barrier.
+        # 已持有的 SQLite 写锁为真实工作线程提供确定性的同步屏障。
         await asyncio.sleep(0.05)
         task.cancel()
         await asyncio.sleep(0.05)
@@ -392,7 +392,7 @@ async def test_deeply_malformed_persisted_json_is_a_sanitized_corruption_error(t
     path = tmp_path / "state.db"
     store = api.SqliteStateStore(path)
     lease = await store.create("run", {})
-    # A valid checksum cannot turn an undecodable payload into a valid state.
+    # 校验和有效，不能使无法解码的载荷变成有效状态。
     text = '{"value":' * 10000 + "null" + "}" * 10000
     digest = hashlib.sha256(text.encode()).hexdigest()
     try:
@@ -407,7 +407,7 @@ async def test_deeply_malformed_persisted_json_is_a_sanitized_corruption_error(t
 
 
 async def test_concurrent_initializer_between_schema_reads_is_accepted(tmp_path, monkeypatch):
-    """Pause the first real connection between its two schema preflight reads."""
+    """在第一次真实连接的两次模式预检读取之间将其暂停。"""
     api = state_api()
     path = tmp_path / "state.db"
     first, second = api.SqliteStateStore(path), api.SqliteStateStore(path)
@@ -445,7 +445,7 @@ async def test_concurrent_initializer_between_schema_reads_is_accepted(tmp_path,
 
 
 async def test_wal_initialization_retries_transient_sqlite_lock(tmp_path):
-    """SQLite journal-mode transitions can ignore its usual busy timeout."""
+    """SQLite 日志模式切换可能不遵守常规的繁忙超时设置。"""
     api = state_api()
     path = tmp_path / "state.db"
     initial = api.SqliteStateStore(path)

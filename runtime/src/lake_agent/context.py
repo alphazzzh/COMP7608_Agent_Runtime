@@ -1,9 +1,8 @@
-"""Bounded model working context, independent of the complete audit record.
+"""有界的模型工作上下文，与完整审计记录相互独立。
 
-Inspired by result persistence and pre-request budgeting in the supplied Claude
-Code reference. Full results remain owned by the controller; these pure
-functions return detached JSON previews and local JSON Pointer pages. Limits
-measure serialized UTF-8 bytes, never tokenizer or provider usage estimates.
+设计参考了所提供 Claude Code 资料中的结果持久化和请求前预算控制。
+完整结果仍由控制器持有；本模块的纯函数返回独立的 JSON 预览和本地 JSON Pointer 页面。
+限制按序列化后的 UTF-8 字节计算，不估算 token 数或服务商用量。
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ _OBSERVATION_KEYS = frozenset(
 
 
 def _preview(value: JsonValue, limit: int) -> JsonValue:
-    """Preserve small structured values; mark partial JSON text explicitly."""
+    """保留较小的结构化值，并明确标记被截取的 JSON 文本。"""
     encoded = canonical_json(value)
     if len(encoded) <= limit:
         return json.loads(encoded)
@@ -53,7 +52,7 @@ def _preview(value: JsonValue, limit: int) -> JsonValue:
 
 
 def _observation(item: dict, limit: int) -> dict:
-    """Retain stable provenance without letting bulk data crowd out feedback."""
+    """保留稳定的来源信息，避免大体积数据挤占反馈空间。"""
     result = item["result"]
     projected = {
         key: value
@@ -73,7 +72,7 @@ def _observation(item: dict, limit: int) -> dict:
 
 
 def _evidence(item: EvidenceRecord, limit: int) -> dict:
-    """A preview has an evidence ID but never replaces the original evidence."""
+    """预览保留证据 ID，但始终不能替代原始证据。"""
     return {
         "evidence_id": item.evidence_id,
         "source_id": item.source_id,
@@ -93,13 +92,11 @@ def build_planner_context(
     preview_bytes: int,
     read_result: dict | None = None,
 ) -> dict:
-    """Pack observations and evidence into an exact, omission-aware JSON budget.
+    """在精确的 JSON 字节预算内装入观测与证据，并记录省略数量。
 
-    The latest observation for this subtask and latest evidence get first
-    opportunity to fit, then earlier observations and evidence follow. Within
-    each group the order is deterministic. Oversized provenance is omitted as a
-    whole rather than fabricating shortened identifiers. Requested read pages
-    are kept whole so their offsets remain meaningful.
+    优先尝试放入当前子任务的最新观测和最新证据，再处理更早的观测与证据。
+    各组内部的顺序确定不变。来源信息过大时整体省略，不伪造缩短后的标识符。
+    请求读取的页面保持完整，以保留偏移量的含义。
     """
     if (
         type(max_bytes) is not int
@@ -170,11 +167,10 @@ def read_json_page(
     max_chars: int,
     max_bytes: int,
 ) -> dict:
-    """Page canonical JSON at an RFC 6901 location, bounded after JSON escaping.
+    """按 RFC 6901 定位并分页读取规范 JSON，在 JSON 转义后检查大小上限。
 
-    No paths, URLs, files, or object attributes are accessed. The empty pointer
-    selects the whole result. Offsets refer to Unicode characters, not bytes;
-    clients can concatenate page text and parse JSON once the last page arrives.
+    本函数不访问路径、URL、文件或对象属性。空指针选择整个结果。
+    偏移量按 Unicode 字符而非字节计算；客户端可拼接各页文本，并在末页到达后解析 JSON。
     """
     if (
         not isinstance(pointer, str)
@@ -194,7 +190,7 @@ def read_json_page(
         if isinstance(selected, dict) and token in selected:
             selected = selected[token]
         elif isinstance(selected, list) and re.fullmatch(r"0|[1-9][0-9]*", token):
-            # Bound the decimal representation before converting untrusted input.
+            # 转换不可信输入前，先限制其十进制表示的长度。
             if len(token) > len(str(len(selected))) or int(token) >= len(selected):
                 raise ValueError("JSON pointer array index is out of range")
             selected = selected[int(token)]

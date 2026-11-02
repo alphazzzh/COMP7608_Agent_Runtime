@@ -1,8 +1,7 @@
-"""Review regressions for ownership changes at web job lifecycle boundaries.
+"""Web 任务生命周期边界上所有权变更的审查回归测试。
 
-All assertions use the HTTP view of a real local run. Test-owned gates expose
-the interval after an old task drains and before admission finishes; the core
-runtime, journal, trace and repository operations remain in the execution path.
+所有断言均使用真实本地运行的 HTTP 视图。测试拥有的事件关卡暴露旧任务结束之后、
+准入完成之前的间隙；核心运行时、调用日志、轨迹和仓库操作仍参与实际执行。
 """
 
 import asyncio
@@ -18,7 +17,7 @@ from test_web import InvokeGate, create_run, make_app, running_client, wait_stop
 
 
 async def test_old_cancel_cannot_overwrite_a_new_resume(tmp_path, monkeypatch):
-    """A cancelled generation cannot settle metadata owned by its successor."""
+    """被取消的旧代任务不能落定其后继任务拥有的元数据。"""
     gate = InvokeGate(monkeypatch)
     app = make_app(tmp_path)
     service = app.state.demo_service
@@ -57,14 +56,14 @@ async def test_old_cancel_cannot_overwrite_a_new_resume(tmp_path, monkeypatch):
             try:
                 async with asyncio.timeout(4):
                     await settle_entered.wait()
-                # The original runtime has already drained and released its
-                # lease. Hold the real resume at its next acquisition boundary.
+                # 原始运行任务已经结束并释放租约。
+                # 在下一次获取租约的边界阻塞真实 resume 流程。
                 monkeypatch.setattr(service.state_store, "acquire", held_acquire)
                 cancel_serializes_admission = service.lock.locked()
                 resumed = asyncio.create_task(client.post(f"/api/runs/{run_id}/resume"))
                 if not cancel_serializes_admission:
-                    # On the defective manager the successor can start while
-                    # the old cancellation remains inside its settlement gate.
+                    # 在有缺陷的管理器中，后继任务可能已经启动，
+                    # 而旧任务的取消仍停留在最终状态落定关卡内。
                     async with asyncio.timeout(4):
                         await resume_entered.wait()
                 allow_settle.set()
@@ -86,7 +85,7 @@ async def test_old_cancel_cannot_overwrite_a_new_resume(tmp_path, monkeypatch):
 
 
 async def test_shutdown_cannot_finish_before_an_admitted_create_spawns(tmp_path, monkeypatch):
-    """An admission in progress is included in shutdown's owned job snapshot."""
+    """正在进行的准入必须包含在关闭服务时拥有的任务快照内。"""
     app = make_app(tmp_path)
     service = app.state.demo_service
     async with app.router.lifespan_context(app):
@@ -120,8 +119,8 @@ async def test_shutdown_cannot_finish_before_an_admitted_create_spawns(tmp_path,
                 async with asyncio.timeout(4):
                     await close_entered.wait()
                 if service.closing:
-                    # Without coordinated admission, shutdown sees no spawned
-                    # jobs and closes the store while this POST is still held.
+                    # 若准入缺少协调，关闭流程会看不到任何已派生任务，
+                    # 从而在此 POST 仍被阻塞时就关闭存储。
                     async with asyncio.timeout(4):
                         await shutdown
                 allow_save.set()
@@ -141,7 +140,7 @@ async def test_shutdown_cannot_finish_before_an_admitted_create_spawns(tmp_path,
 
 
 async def test_history_uses_the_same_logical_trace_location_as_detail(tmp_path):
-    """History cards cannot expose the operator's absolute filesystem path."""
+    """历史卡片不能暴露操作者的绝对文件系统路径。"""
     async with running_client(tmp_path) as client:
         run_id = await create_run(client)
         view = await wait_stopped(client, run_id)
@@ -153,15 +152,15 @@ async def test_history_uses_the_same_logical_trace_location_as_detail(tmp_path):
 
 
 async def test_restart_reconciles_runs_older_than_the_history_display_limit(tmp_path):
-    """The newest-100 display limit cannot hide stale active ownership forever."""
+    """仅显示最新 100 条记录的限制，不能永远隐藏过期的活跃所有权。"""
     async with running_client(tmp_path) as client:
         run_id = await create_run(client)
         await wait_stopped(client, run_id)
 
     manifest = tmp_path / "metadata" / f"{run_id}.json"
     record = json.loads(manifest.read_text())
-    # Seed independent completed presentation records, avoiding 100 unnecessary
-    # controller executions. The original remains backed by real core state.
+    # 预先写入独立且已完成的展示记录，避免 100 次无必要的控制器执行。
+    # 原始运行仍以真实核心状态为依据。
     for index in range(100):
         identity = f"run-{uuid4().hex}"
         newer = {

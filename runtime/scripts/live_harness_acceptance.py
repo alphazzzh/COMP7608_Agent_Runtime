@@ -1,22 +1,21 @@
-"""One opt-in live acceptance of the tool-observation harness.
+"""显式启用后，对工具观测执行框架执行一次在线验收。
 
-The PlannerPort is the real JsonPlanner and uses the configured remote model.
-DataPort and ContentPort are explicitly SYNTHETIC local fixtures: this checks
-inspect -> local read_observation -> query -> finish, never retrieval or answer
-quality on a real data lake. A fresh unpredictable table name occurs only in
-the full inspect result until the controller returns its requested JSON page.
+PlannerPort 使用真实 JsonPlanner，并调用配置的远程模型。
+DataPort 与 ContentPort 明确属于本地合成测试替身；本脚本检查
+inspect -> local read_observation -> query -> finish 流程，
+不验证真实数据池中的检索或答案质量。每次生成一个不可预测的新表名，
+在控制器返回所请求的 JSON 页面前，该表名仅存在于完整 inspect 结果中。
 
-Run from project/runtime after installing the runtime dependencies::
+安装运行时依赖后，从 project/runtime 执行::
 
     .venv/bin/python scripts/live_harness_acceptance.py --help
     .venv/bin/python scripts/live_harness_acceptance.py --live
 
-Credentials use live_controller_acceptance.read_credential (MODEL_API_KEY or
-the existing authorized macOS Keychain item). Secrets are never printed, put
-in model input, or deliberately persisted. There is exactly one run, no outer
-retry, no HTTP retry/redirect, and no automatic data-operation retry. A failure
-report is still written for ordinary exceptions and user interruption; an OS
-kill or unwritable output directory cannot guarantee a report.
+凭据通过 live_controller_acceptance.read_credential 读取，使用 MODEL_API_KEY
+或已有且获授权的 macOS Keychain 条目。密钥绝不打印、不放入模型输入，
+也不有意持久化。只执行一次运行，不进行外层重试、HTTP 重试或重定向，
+也不自动重试数据操作。普通异常和用户中断时仍会写入失败报告；
+操作系统强制终止或输出目录不可写时，无法保证生成报告。
 """
 
 from __future__ import annotations
@@ -51,14 +50,14 @@ SAFE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 
 
 class SyntheticData:
-    """Expose one read-only source; only inspect reveals its random table name."""
+    """公开一个只读数据源；只有 inspect 会揭示随机生成的表名。"""
 
     def __init__(self) -> None:
         self.query_table = "synthetic_annual_" + uuid4().hex
         self.invocations: list[m.ToolRequest] = []
 
     def tool_specs(self) -> list[m.ToolSpec]:
-        """Advertise generic argument shapes without embedding the table value."""
+        """声明通用参数结构，不将表名值嵌入其中。"""
         specs = []
         for name in ("inspect", "query"):
             properties = {"source_id": {"type": "string"}}
@@ -86,7 +85,7 @@ class SyntheticData:
         return specs
 
     async def catalog(self, request: m.CatalogRequest) -> m.CatalogResult:
-        """Provide no schema/table hints in the catalog or retrieval metadata."""
+        """目录与检索元数据均不提供模式或表名提示。"""
         return m.CatalogResult(
             call_id=request.call_id,
             catalog_snapshot_id="synthetic-harness-v1",
@@ -101,7 +100,7 @@ class SyntheticData:
         )
 
     async def invoke(self, request: m.ToolRequest) -> m.ToolResult:
-        """Return bulky schema or evidence; a guessed table is safely correctable."""
+        """返回大体积模式信息或证据；猜测表名导致的失败允许安全地修正输入。"""
         self.invocations.append(request)
         if request.tool_name == "inspect":
             return m.ToolResult(
@@ -109,9 +108,9 @@ class SyntheticData:
                 data={
                     "fixture": "SYNTHETIC; no real data-lake source",
                     "schema": {
-                        # canonical_json sorts keys. Padding sorts before
-                        # query_table, placing its random value past the 512
-                        # byte preview even if serialization order changes.
+                        # canonical_json 会对键排序。填充字段排在 query_table 前面，
+                        # 因而即使序列化顺序变化，随机表名值仍会落在
+                        # 512 字节预览范围之外。
                         "padding": "Synthetic schema documentation. " * 256,
                         "query_table": self.query_table,
                     },
@@ -148,11 +147,11 @@ class SyntheticData:
 
 
 class SyntheticContent(DemoContent):
-    """Keep catalog/search/verification local and compose only fixture evidence."""
+    """目录、搜索与校验均在本地完成，答案仅使用合成测试证据。"""
 
     async def compose(self, request: m.ComposeRequest) -> m.ModuleResult[m.AnswerRecord]:
-        # This deliberately simple composer is not a model-quality test. It
-        # references the actual evidence ID, preserving controller provenance.
+        # 此处有意采用简单的答案组织逻辑，不用于测试模型质量；
+        # 它引用实际证据 ID，保留控制器记录的来源关系。
         if not request.evidence:
             raise ValueError("Synthetic composer requires controller-owned evidence.")
         return m.ModuleResult(
@@ -166,12 +165,11 @@ class SyntheticContent(DemoContent):
 
 
 class CountingTransport(httpx.AsyncBaseTransport):
-    """Count dispatched HTTP attempts, including transport failures, without keys.
+    """统计已派发的 HTTP 尝试，包括传输失败，不记录密钥。
 
-    Response hooks alone miss requests that fail before headers arrive. This
-    wrapper records only lengths, booleans, phase and status; headers, raw model
-    responses and request bodies never enter its report. The independent hard
-    cap prevents a runtime regression from dispatching unbounded requests.
+    仅依赖响应钩子会漏掉响应头到达前已失败的请求。本包装器只记录长度、
+    布尔值、阶段与状态，不将请求头、原始模型响应或请求体写入报告。
+    独立的硬上限可避免运行时回归导致请求无界派发。
     """
 
     def __init__(self, table: str, max_requests: int) -> None:
@@ -232,8 +230,8 @@ class CountingTransport(httpx.AsyncBaseTransport):
         try:
             response = await self.delegate.handle_async_request(request)
         except BaseException:
-            # A timeout/cancellation is still a physical HTTP attempt; keep its
-            # count but never stringify an exception that may contain headers.
+            # 超时或取消仍属于一次实际 HTTP 尝试；保留其计数，
+            # 但绝不将可能含有请求头的异常转换为字符串。
             record["transport_failed"] = True
             raise
         record["http_status"] = response.status_code
@@ -244,7 +242,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
 
 
 def source_hashes() -> dict[str, str]:
-    """Identify the tested code independently of cwd, without reading secrets."""
+    """不依赖当前工作目录识别被测源码，也不读取密钥。"""
     paths = sorted((RUNTIME_ROOT / "src" / "lake_agent").glob("*.py"))
     paths.extend(
         RUNTIME_ROOT / relative
@@ -263,7 +261,7 @@ def source_hashes() -> dict[str, str]:
 
 
 def inspect_trace(path: Path, run_id: str) -> tuple[dict, dict, list[dict]]:
-    """Audit complete or partial traces without dropping evidence on failure."""
+    """审计完整或部分轨迹，失败时仍保留已有证据。"""
     events: list[dict] = []
     artifacts: dict[str, dict] = {}
     problems = []
@@ -331,7 +329,7 @@ def inspect_trace(path: Path, run_id: str) -> tuple[dict, dict, list[dict]]:
 
 
 async def execute(args: argparse.Namespace, report: dict, output: Path) -> None:
-    """Make a single budgeted run; the caller always writes the final report."""
+    """执行一次预算受限的运行；最终报告始终由调用方负责写入。"""
     data = SyntheticData()
     transport = CountingTransport(data.query_table, args.max_requests)
     report["http_attempts"] = transport.attempts
@@ -377,8 +375,8 @@ async def execute(args: argparse.Namespace, report: dict, output: Path) -> None:
     )
     report["run_config"] = request.config.model_dump(mode="json")
     try:
-        # Credential lookup occurs only after --live and output preparation.
-        # Keep the key in memory only; errors below retain only exception type.
+        # 仅在检查 --live 并准备好输出位置后，才查询凭据。
+        # 密钥只保存在内存中；下面的错误记录仅保留异常类型。
         secret = read_credential(BASE_URL)
         async with httpx.AsyncClient(transport=transport, follow_redirects=False) as client:
             async with JsonPlanner(BASE_URL, secret, client=client) as planner:
@@ -390,8 +388,8 @@ async def execute(args: argparse.Namespace, report: dict, output: Path) -> None:
                     trace=JsonlTraceSink(output / "runs"),
                 )
     finally:
-        # This also covers credential lookup failing before AsyncClient owns
-        # the transport. HTTPX transport closure is safe to repeat.
+        # 这也覆盖 AsyncClient 接管传输器前凭据查询就失败的情况。
+        # 重复关闭 HTTPX 传输器是安全的。
         await transport.aclose()
         report["http_requests"] = len(transport.attempts)
         report["http_responses"] = sum(
@@ -415,7 +413,7 @@ async def execute(args: argparse.Namespace, report: dict, output: Path) -> None:
 
 
 def finalize_checks(report: dict, output: Path) -> None:
-    """Derive acceptance from persisted requests/pages/results, including failures."""
+    """根据持久化的请求、页面与结果判定验收是否通过，也纳入失败情况。"""
     path = output / "runs" / report["run_id"] / "events.jsonl"
     audit, artifacts, events = inspect_trace(path, report["run_id"])
     report["trace"] = audit
@@ -567,8 +565,8 @@ def main() -> None:
         report["source_sha256"] = source_hashes()
         asyncio.run(execute(args, report, output))
     except (Exception, KeyboardInterrupt) as exc:
-        # Never print exception messages or tracebacks: imported credential
-        # helpers and third-party transports may attach sensitive arguments.
+        # 绝不打印异常消息或回溯：导入的凭据辅助函数与第三方传输器
+        # 可能在其中附带敏感参数。
         report["failure"] = {"stage": "execution", "type": type(exc).__name__}
     try:
         finalize_checks(report, output)

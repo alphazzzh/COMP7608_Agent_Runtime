@@ -1,7 +1,7 @@
-"""Concrete review regressions at the web job and referenced-file boundaries.
+"""Web 任务与引用文件边界的具体审查回归测试。
 
-Fixtures use the real local service and disk repository. Gates only interrupt
-admission or replace a test-owned artifact directory after execution has ended.
+测试替身使用真实的本地服务与磁盘仓库。事件关卡只中断准入，
+或在执行结束后替换测试拥有的产物目录。
 """
 
 import asyncio
@@ -16,7 +16,7 @@ from test_web import create_run, running_client, wait_stopped
 
 
 async def test_cancelled_http_admission_does_not_leave_queued_run(tmp_path, monkeypatch):
-    """A disconnected POST cannot leave a run falsely marked as queued forever."""
+    """POST 连接中断后，不能使运行一直被错误标记为排队中。"""
     from lake_agent.web.storage import Repository
 
     entered, release = threading.Event(), threading.Event()
@@ -53,7 +53,7 @@ async def test_cancelled_http_admission_does_not_leave_queued_run(tmp_path, monk
 
 
 async def test_referenced_artifact_symlink_cannot_escape_attempt(tmp_path):
-    """A valid referenced filename must still stay inside its owning attempt."""
+    """即使被引用的文件名有效，也必须仍处于其所属尝试的目录内。"""
     async with running_client(tmp_path) as client:
         run_id = await create_run(client)
         view = await wait_stopped(client, run_id)

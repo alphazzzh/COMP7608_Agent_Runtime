@@ -1,12 +1,11 @@
-"""Verify the optional web wheel through an isolated install and real local HTTP.
+"""通过隔离安装与真实本地 HTTP，验证可选网页组件的 wheel 包。
 
-Run ``uv build`` first, then execute this script from any working directory.
-The default install uses cached dependencies only; ``--allow-downloads`` permits
-dependency downloads when the cache is cold. No model endpoints or credentials
-are used. A copied probe runs with isolated Python outside the checkout, starts
-the installed CLI, checks all three synthetic scenarios and restarts the server.
-The temporary environment, server and synthetic data are removed before the
-JSON evidence report is written, including when verification fails.
+先运行 ``uv build``，再从任意工作目录执行本脚本。
+默认安装仅使用缓存依赖；缓存不足时，``--allow-downloads`` 允许下载依赖。
+脚本不使用模型端点或凭据。复制后的探测程序在源码检出目录外的隔离 Python 中执行，
+启动已安装的命令行入口，检查全部三个合成场景，并重启服务器。
+无论验证成功与否，都会先移除临时环境、服务器和合成数据，
+再写入 JSON 验证证据报告。
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from pathlib import Path
 
 
 def checked_command(args, *, cwd, env=None):
-    """Run a bounded child without forwarding inherited Python import paths."""
+    """运行有时限的子进程，不转发继承来的 Python 导入路径。"""
     result = subprocess.run(
         args, cwd=cwd, env=env, text=True, capture_output=True, timeout=90, check=False
     )
@@ -45,7 +44,7 @@ def checked_command(args, *, cwd, env=None):
 
 
 def clean_environment():
-    """Keep ordinary OS settings while removing source import contamination."""
+    """保留常规操作系统设置，移除可能混入源码的导入配置。"""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
@@ -54,7 +53,7 @@ def clean_environment():
 
 
 def wheel_identity(root, wheel, expected_version):
-    """Check install metadata and compare every packaged source/static byte."""
+    """检查安装元数据，并逐字节比较打包的源码与静态资源。"""
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
@@ -101,7 +100,7 @@ def wheel_identity(root, wheel, expected_version):
 
 
 def probe_installed(expected_version):
-    """Exercise the installed package in a separate, isolated interpreter."""
+    """在独立且隔离的解释器中检验已安装的软件包。"""
     import asyncio
     from importlib import metadata
 
@@ -120,8 +119,8 @@ def probe_installed(expected_version):
     assert lake_agent.__version__ == expected_version
     cli = Path(sys.executable).with_name("lake-agent-web")
     assert cli.is_file(), cli
-    # Reserve only long enough to choose a free local port. The server itself
-    # owns the listening socket and is always terminated in the context exit.
+    # 只短暂占用套接字以选出空闲本地端口。监听套接字由服务器自身持有，
+    # 离开上下文时始终会终止服务器。
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -200,8 +199,8 @@ def probe_installed(expected_version):
             "evidence_ids": [item["evidence_id"] for item in view["evidence"]],
         }
 
-    # Inspect the installed engine as well as exercising it through HTTP below.
-    # Building a graph performs no adapter I/O and opens no audit directory.
+    # 除了下面的 HTTP 验证，还检查已安装的执行引擎。
+    # 构建图不会触发适配器 I/O，也不会打开审计目录。
     async def inspect_graph():
         graph = build_workflow(
             _Controller(
@@ -346,8 +345,8 @@ def probe_installed(expected_version):
         checks["restart"] = {"persisted_runs": len(history), "results_unchanged": True}
         assert client.get(f"/api/evaluations/{imported['evaluation_id']}").json() == imported
         checks["evaluations"]["persists_after_restart"] = True
-    # Uvicorn re-raises the handled signal on POSIX after lifespan shutdown.
-    # The signal exit is valid only when both shutdowns actually completed.
+    # 在 POSIX 上，Uvicorn 会在生命周期关闭后重新触发已处理的信号。
+    # 只有两次关闭都实际完成，信号退出才算有效。
     assert len(exits) == 2 and all(code in {0, -signal.SIGTERM} for code in exits), exits
     assert log_path.read_text().count("Application shutdown complete.") == 2
     return {
@@ -360,7 +359,7 @@ def probe_installed(expected_version):
 
 
 def main():
-    """Build a portable evidence report after all temporary resources close."""
+    """关闭全部临时资源后，生成可移植的验证证据报告。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--report", type=Path)
@@ -406,8 +405,8 @@ def main():
             report["isolated_install"] = json.loads(result)
             report["outside_checkout"] = True
         report["temporary_environment_removed"] = not work.exists()
-        # Catch concurrent source edits after build rather than certifying a
-        # stale wheel as the current checkout's release artifact.
+        # 检测构建后并发发生的源码修改，避免把过期 wheel
+        # 认证为当前源码检出目录对应的发布工件。
         assert wheel_identity(root, wheel, version) == report["wheel"]
         report["status"] = "passed"
     except Exception as exc:

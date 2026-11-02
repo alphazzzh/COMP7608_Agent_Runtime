@@ -1,10 +1,9 @@
-"""Strict, private storage for caller-imported evaluation summaries.
+"""为调用方导入的评测摘要提供严格校验与私有存储。
 
-Reports describe externally performed evaluations: this module never executes a
-benchmark or infers an unknown metric. All filesystem work runs through the web
-storage worker, whose cancellation boundary drains pending writes. Directory
-descriptors and no-follow opens keep report identifiers inside the private
-``evaluations`` folder; atomic replacement exposes only complete JSON records.
+报告描述外部已完成的评测：本模块不运行基准测试，也不推断未知指标。
+所有文件系统操作均通过网页存储工作线程执行；取消时会等待待完成的写入收尾。
+目录描述符与禁止跟随符号链接的打开方式将报告标识符限制在私有 ``evaluations``
+目录内；原子替换确保对外可见的始终是完整 JSON 记录。
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ _TIMESTAMP = Annotated[str, Field(max_length=64)]
 
 
 def _aware_iso(value: str) -> str:
-    """Preserve the submitted ISO spelling while requiring a real UTC offset."""
+    """要求时间具有真实的 UTC 偏移，同时保留提交时的 ISO 字符串写法。"""
     parsed = datetime.fromisoformat(value)
     if parsed.utcoffset() is None:
         raise ValueError("evaluation timestamps require an explicit timezone")
@@ -44,7 +43,7 @@ def _aware_iso(value: str) -> str:
 
 
 class _EvaluationModel(Model):
-    """Keep imported text serializable as UTF-8 as well as strictly typed."""
+    """严格检查导入文本的类型，并确保其可序列化为 UTF-8。"""
 
     @field_validator("*")
     @classmethod
@@ -55,7 +54,7 @@ class _EvaluationModel(Model):
 
 
 class EvaluationMetrics(_EvaluationModel):
-    """Nullable reported metrics; absence conveys no measured value."""
+    """可为空的上报指标；缺失表示没有提供测量值。"""
 
     accuracy: _UNIT | None = None
     retrieval_precision: _UNIT | None = None
@@ -70,7 +69,7 @@ class EvaluationMetrics(_EvaluationModel):
 
 
 class EvaluationRow(_EvaluationModel):
-    """One permitted execution mode and its independently declared task count."""
+    """一个允许的执行模式，及为该模式独立声明的任务数量。"""
 
     mode: Mode
     task_count: Annotated[int, Field(ge=1, le=1_000_000)]
@@ -78,7 +77,7 @@ class EvaluationRow(_EvaluationModel):
 
 
 class EvaluationImport(_EvaluationModel):
-    """Caller-supplied assessment metadata, excluding server-owned provenance."""
+    """调用方提供的评估元数据，不含服务端管理的来源记录。"""
 
     title: Annotated[str, Field(min_length=1, max_length=160)]
     dataset_id: _LABEL
@@ -102,7 +101,7 @@ class EvaluationImport(_EvaluationModel):
 
 
 class _EvaluationReport(EvaluationImport):
-    """Revalidate saved records, including immutable server-owned provenance."""
+    """重新校验已保存记录，包括由服务端管理且不可变的来源记录。"""
 
     evaluation_id: str
     imported_at: _TIMESTAMP
@@ -122,17 +121,16 @@ class _EvaluationReport(EvaluationImport):
 
 
 class EvaluationRepository:
-    """Create and read validated full reports within one private data root.
+    """在单一私有数据根目录内，创建并读取经校验的完整报告。
 
-    The owning web repository provides the process-level data-directory lock.
-    This independent repository needs no background tasks or retained handles:
-    concurrent creates use distinct temporary files and atomic publication, and
-    reads/scans open fresh descriptors that are closed inside their worker.
+    所属网页仓库负责数据目录的进程级锁。本独立仓库无需后台任务或长期保留的句柄：
+    并发创建使用不同临时文件并原子发布；读取和扫描会打开新的描述符，
+    并在相应工作线程内关闭。
     """
 
     def __init__(self, root):
-        # Absolute-path normalization is lexical; no filesystem lookup occurs
-        # until start() schedules its observed disk worker.
+        # 绝对路径规范化只处理路径文本；只有 start() 调度受跟踪的
+        # 磁盘工作线程后，才会查询文件系统。
         self.root = Path(root).expanduser().absolute()
 
     @staticmethod
@@ -140,7 +138,7 @@ class EvaluationRepository:
         return WebError("evaluations_unavailable", "评估报告无法读取或保存。", 503)
 
     async def start(self) -> None:
-        """Create private directories and reject a substituted symlink folder."""
+        """创建私有目录，并拒绝被替换为符号链接的目录。"""
         await disk(self._start)
 
     def _start(self) -> None:
@@ -167,7 +165,7 @@ class EvaluationRepository:
 
     @contextmanager
     def _directory(self) -> Iterator[int]:
-        """Anchor all report operations to a non-symlink directory descriptor."""
+        """将全部报告操作锚定到不跟随符号链接的目录描述符。"""
         root_fd = os.open(self.root, _DIRECTORY_FLAGS)
         try:
             directory = os.open("evaluations", _DIRECTORY_FLAGS, dir_fd=root_fd)
@@ -179,9 +177,9 @@ class EvaluationRepository:
             os.close(root_fd)
 
     async def create(self, report: EvaluationImport) -> dict:
-        """Freeze validated caller data before handing immutable bytes to disk."""
-        # Revalidate even caller-constructed/mutated model instances. Copying
-        # through their plain data also detaches every nested result and metric.
+        """先冻结经校验的调用方数据，再将不可变字节交给磁盘工作线程。"""
+        # 即使模型由调用方构造或修改，也要重新校验。通过普通数据复制，
+        # 同时使所有嵌套结果和指标与原对象相互独立。
         imported = EvaluationImport.model_validate(report.model_dump(mode="python"))
         value = _EvaluationReport.model_validate(
             {
@@ -192,8 +190,8 @@ class EvaluationRepository:
             }
         ).model_dump(mode="json")
         encoded = canonical_json(value)
-        # Successful creation must always produce a file accepted by _load,
-        # even if a future model change expands the allowed serialized payload.
+        # 创建成功后产生的文件必须始终能被 _load 接受，即使未来模型变化
+        # 扩大了允许序列化的载荷范围，也应满足此约束。
         if len(encoded) > _MAX_RECORD_BYTES:
             raise WebError("evaluation_too_large", "评估报告超过保存上限。", 413)
         await disk(self._save, value["evaluation_id"], encoded)
@@ -203,8 +201,8 @@ class EvaluationRepository:
         temporary = f".evaluation-{uuid4().hex}.tmp"
         try:
             with self._directory() as directory:
-                # O_EXCL and mode 0600 make the first byte private; no chmod
-                # interval exposes a newly created file through the process umask.
+                # O_EXCL 与 0600 权限确保从首个字节起文件就是私有的，
+                # 避免先受进程 umask 影响、再 chmod 的权限暴露窗口。
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                 descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
                 try:
@@ -228,7 +226,7 @@ class EvaluationRepository:
             raise self._unavailable() from None
 
     async def get(self, evaluation_id: str) -> dict:
-        """Return one validated full report without accepting arbitrary paths."""
+        """返回一份经校验的完整报告，不接受任意路径。"""
         if not isinstance(evaluation_id, str) or not _IDENTITY.fullmatch(evaluation_id):
             raise WebError("not_found", "未找到该评估报告。", 404)
         return await disk(self._get, evaluation_id)
@@ -244,9 +242,9 @@ class EvaluationRepository:
 
     @staticmethod
     def _load(directory: int, identity: str) -> dict:
-        # Nonblocking open avoids hanging on a replaced FIFO; only regular,
-        # bounded files are parsed. The second byte bound also handles growth
-        # after fstat without an unbounded read into memory.
+        # 非阻塞打开避免因文件被替换成 FIFO 而挂起；仅解析大小受限的
+        # 普通文件。第二次字节限制检查还可防止文件在 fstat 后增长，
+        # 从而避免无界读入内存。
         flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(f"{identity}.json", flags, dir_fd=directory)
         with os.fdopen(descriptor, "rb") as source:
@@ -256,15 +254,15 @@ class EvaluationRepository:
             raw = source.read(_MAX_RECORD_BYTES + 1)
         if len(raw) > _MAX_RECORD_BYTES:
             raise ValueError("oversize report")
-        # Pydantic's bounded-depth JSON decoder rejects deeply nested corrupt
-        # input as a validation error instead of leaking a RecursionError.
+        # Pydantic 的 JSON 解码器限制嵌套深度，将过深的损坏输入作为
+        # 校验错误拒绝，而不向外泄露 RecursionError。
         report = _EvaluationReport.model_validate_json(raw)
         if report.evaluation_id != identity:
             raise ValueError("evaluation ownership mismatch")
         return report.model_dump(mode="json")
 
     async def listing(self) -> list[dict]:
-        """Return at most 100 complete reports, newest import first."""
+        """最多返回 100 份完整报告，按导入时间从新到旧排列。"""
         return await disk(self._listing)
 
     def _listing(self) -> list[dict]:
@@ -272,8 +270,8 @@ class EvaluationRepository:
             with self._directory() as directory:
 
                 def records():
-                    # Keep only the current top 100 in memory. Validation and
-                    # timestamp comparisons still happen wholly in this worker.
+                    # 内存中只保留当前最新的 100 份报告。校验与时间戳比较
+                    # 仍全部在此工作线程中完成。
                     with os.scandir(directory) as entries:
                         for entry in entries:
                             if entry.name.endswith(".json") and _IDENTITY.fullmatch(

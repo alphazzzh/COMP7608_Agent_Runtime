@@ -1,10 +1,10 @@
-"""Opt-in live acceptance for the controller with a real PlannerPort.
+"""通过真实 PlannerPort 对控制器执行需显式启用的在线验收。
 
-Data and Content ports deliberately use synthetic local fixtures. This checks
-control flow and integration contracts, never real retrieval/answer quality.
-Run explicitly from the runtime directory; offline pytest never imports it.
-Credentials come from an environment variable or the authorized macOS Keychain
-item and are never emitted or stored in reports, traces, or command arguments.
+DataPort 与 ContentPort 有意使用本地合成测试替身。
+本脚本检查控制流程与集成契约，不验证真实检索或答案质量。
+须从 runtime 目录显式运行；离线 pytest 不会导入本脚本。
+凭据来自环境变量或已获授权的 macOS Keychain 条目，
+绝不输出，也不存入报告、轨迹或命令参数。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from lake_agent.trace import JsonlTraceSink
 
 
 def read_credential(base_url: str) -> str:
-    """Retrieve an explicitly configured secret without ever printing it."""
+    """读取已显式配置的密钥，始终不打印其内容。"""
     if os.environ.get("MODEL_API_KEY"):
         return os.environ["MODEL_API_KEY"]
     security = ctypes.CDLL(ctypes.util.find_library("Security"))
@@ -71,7 +71,7 @@ def read_credential(base_url: str) -> str:
 
 
 class FeedbackFixture(DemoContent):
-    """Ask for one real replanning pass; verification itself remains a fixture."""
+    """要求实际触发一轮重新规划；校验步骤本身仍是测试替身。"""
 
     def __init__(self):
         super().__init__()
@@ -100,7 +100,7 @@ class FeedbackFixture(DemoContent):
 
 
 def inspect_run(result: m.RunResult, root: Path, *, feedback: bool) -> dict:
-    """Validate committed events, artifacts, provenance and dispatch accounting."""
+    """校验已提交事件、工件、来源信息和请求派发计数。"""
     trace = Path(result.trace_ref) if result.trace_ref else None
     if trace is None:
         raise AssertionError("The controller did not return a trace.")
@@ -159,7 +159,7 @@ async def acceptance(args, secret: str) -> dict:
     observations = []
 
     async def observe_response(response):
-        # Do not retain headers, credential, raw content, or provider error text.
+        # 不保留请求头、凭据、原始正文或服务商错误文本。
         observations.append({"http_status": response.status_code})
 
     async with httpx.AsyncClient(
@@ -206,8 +206,8 @@ async def acceptance(args, secret: str) -> dict:
             summaries = []
             summaries.append(await scenario("fixed", "fixed_retrieval"))
             summaries.append(await scenario("no-verifier", "no_verifier"))
-            # Sharing a reentrant planner/client and content fixture exercises
-            # run-local handles, budgets, citations and independent TraceSinks.
+            # 共享可重入的规划器、客户端与内容测试替身，检验各运行独有的
+            # 句柄、预算、引用与独立 TraceSink 是否得到正确隔离。
             shared = DemoContent()
             pair = await asyncio.gather(
                 scenario("concurrent-a", "full_agent", content=shared),
@@ -221,7 +221,7 @@ async def acceptance(args, secret: str) -> dict:
                 await scenario("feedback", "full_agent", content=FeedbackFixture(), feedback=True)
             )
 
-    # No task created by the runtime/client should remain after closing them.
+    # 关闭运行时与客户端后，不应残留由它们创建的任务。
     pending_tasks = [
         t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
     ]

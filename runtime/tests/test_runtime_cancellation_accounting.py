@@ -1,7 +1,7 @@
-"""Regression tests for provider accounting at caller-cancellation boundaries.
+"""调用方取消边界上提供方用量记账的回归测试。
 
-An interrupted adapter has unknown provider usage; a valid returned response
-settles its declared usage exactly once even if later trace I/O is cancelled.
+适配器被中断时，提供方用量未知；若已返回有效响应，则按其声明用量恰好记账一次，
+即使后续轨迹 I/O 被取消也必须如此。
 """
 
 import asyncio
@@ -14,7 +14,7 @@ from lake_agent.runtime import run
 
 
 class CancellationTrace:
-    """In-memory committed trace with explicit event-driven cancellation gates."""
+    """使用内存保存已提交轨迹，并设置由事件驱动的显式取消关卡。"""
 
     def __init__(self, entered, *, block_return=False):
         self.entered = entered
@@ -41,7 +41,7 @@ class CancellationTrace:
 
 @pytest.mark.parametrize("reported_requests", [None, 0, 1])
 async def test_cancelled_provider_usage_settles_once(reported_requests):
-    """Unknown dispatch is charged once; known local/model usage is preserved."""
+    """调用结果未知时，仅保守计入一次提供方请求；保留已知的本地或模型用量。"""
     entered = asyncio.Event()
 
     class Planner(DemoPlanner):

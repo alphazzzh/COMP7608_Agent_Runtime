@@ -1,7 +1,7 @@
-"""Install the built wheel outside the checkout and recover after real SIGKILL.
+"""在源码检出目录外安装已构建的 wheel，并在真实 SIGKILL 后验证恢复。
 
-All ports are local synthetic fixtures. No credentials, model endpoints or paid
-provider calls are used. The report records wheel/source identity and outcomes.
+所有端口均为本地合成测试替身，不使用凭据、模型端点或付费服务商调用。
+报告记录 wheel 与源码的身份信息及运行结果。
 """
 
 import hashlib

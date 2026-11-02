@@ -1,8 +1,8 @@
-"""Offline web acceptance checks across HTTP, the real harness, SQLite and JSONL.
+"""覆盖 HTTP、真实执行框架、SQLite 与 JSONL 的离线 Web 验收测试。
 
-Every application owns a temporary data directory and runs its explicit ASGI
-lifespan. Adapter gates only delay real local fixture calls; they never replace
-controller, checkpoint, trace or report behavior with fabricated responses.
+每个应用独占一个临时数据目录，并显式运行 ASGI 生命周期。
+适配器关卡仅延迟真实的本地测试替身调用；控制器、检查点、轨迹和报告
+均保留真实行为，不以伪造响应替代。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ pytest.importorskip("fastapi", reason="web acceptance tests require the optional
 
 
 def make_app(data_dir, *, max_active_runs=2):
-    """Resolve the new public factory during execution, retaining useful REDs."""
+    """在执行期间解析新的公开工厂，保留有诊断价值的初始失败。"""
     try:
         module = importlib.import_module("lake_agent.web.app")
     except ModuleNotFoundError as exc:
@@ -34,7 +34,7 @@ def make_app(data_dir, *, max_active_runs=2):
 
 @asynccontextmanager
 async def running_client(data_dir, *, max_active_runs=2):
-    """HTTPX does not dispatch lifespan itself, so always open and drain it here."""
+    """HTTPX 不会自行触发生命周期，因此在此始终显式进入并等待其结束。"""
     app = make_app(data_dir, max_active_runs=max_active_runs)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -44,7 +44,7 @@ async def running_client(data_dir, *, max_active_runs=2):
 
 
 async def create_run(client, *, scenario="standard", question=None, mode="full_agent"):
-    """Submit a synthetic question and return only an accepted run identity."""
+    """提交合成问题，仅返回已受理运行的身份标识。"""
     response = await client.post(
         "/api/runs",
         json={
@@ -60,7 +60,7 @@ async def create_run(client, *, scenario="standard", question=None, mode="full_a
 
 
 async def wait_stopped(client, run_id):
-    """Bound polling and expose the final HTTP view when progress stops."""
+    """限制轮询时长，并在进度停止时显示最终 HTTP 视图。"""
     async with asyncio.timeout(8):
         while True:
             response = await client.get(f"/api/runs/{run_id}")
@@ -72,7 +72,7 @@ async def wait_stopped(client, run_id):
 
 
 async def test_standard_run_executes_harness_and_exposes_evidence(tmp_path):
-    """A cosmetic success response cannot replace actual trace and provenance."""
+    """表面成功的响应不能替代真实轨迹与来源记录。"""
     async with running_client(tmp_path) as client:
         run_id = await create_run(client)
         view = await wait_stopped(client, run_id)
@@ -116,7 +116,7 @@ async def test_standard_run_executes_harness_and_exposes_evidence(tmp_path):
 
 
 async def test_info_describes_offline_scenarios_and_actual_modes_work(tmp_path):
-    """The offline promise and mode selector must match executable behavior."""
+    """离线承诺与模式选择器必须符合实际可执行行为。"""
     async with running_client(tmp_path) as client:
         info = await client.get("/api/info")
         assert info.status_code == 200
@@ -138,7 +138,7 @@ async def test_info_describes_offline_scenarios_and_actual_modes_work(tmp_path):
 
 
 class InvokeGate:
-    """Hold the real local extractor to observe scheduling and cancellation."""
+    """阻塞真实的本地提取器，以观察调度与取消。"""
 
     def __init__(self, monkeypatch, *, expected=1):
         self.requests = []
@@ -164,13 +164,13 @@ class InvokeGate:
         monkeypatch.setattr(DemoData, "invoke", invoke)
 
     async def wait_entered(self):
-        """A serial or missing tool dispatch fails within a bounded interval."""
+        """工具派发串行执行或缺失时，必须在有限等待内使测试失败。"""
         async with asyncio.timeout(4):
             await self.entered.wait()
 
 
 async def test_parallel_scenario_overlaps_real_disjoint_tool_calls(tmp_path, monkeypatch):
-    """Two tools must enter before either response is released to the harness."""
+    """两个工具必须都已进入，之后才允许向执行框架释放任一响应。"""
     gate = InvokeGate(monkeypatch, expected=2)
     async with running_client(tmp_path) as client:
         run_id = await create_run(client, scenario="parallel")
@@ -189,7 +189,7 @@ async def test_parallel_scenario_overlaps_real_disjoint_tool_calls(tmp_path, mon
 
 
 async def test_safe_recovery_keeps_provenance_budget_and_history_after_restart(tmp_path):
-    """Persisted success is replayed with stable IDs, never sent to tools again."""
+    """以稳定 ID 重放持久化的成功结果，绝不再次发送给工具执行。"""
     async with running_client(tmp_path) as client:
         run_id = await create_run(client, scenario="recovery")
         paused = await wait_stopped(client, run_id)
@@ -238,7 +238,7 @@ async def test_safe_recovery_keeps_provenance_budget_and_history_after_restart(t
 
 
 def assert_error_detail(response):
-    """Public errors stay structured and contain no raw Python exception dumps."""
+    """公开错误保持结构化，且不包含原始 Python 异常堆栈。"""
     detail = response.json()["detail"]
     assert isinstance(detail, dict)
     assert isinstance(detail["code"], str) and detail["code"]
@@ -258,7 +258,7 @@ def assert_error_detail(response):
     ],
 )
 async def test_invalid_run_requests_are_rejected_without_creating_history(tmp_path, change):
-    """Malformed public input cannot create an executable or persisted run."""
+    """格式错误的公开输入不能创建可执行或持久化的运行。"""
     payload = {"question": "Revenue?", "scenario": "standard", "mode": "full_agent", **change}
     async with running_client(tmp_path) as client:
         response = await client.post("/api/runs", json=payload)
@@ -268,7 +268,7 @@ async def test_invalid_run_requests_are_rejected_without_creating_history(tmp_pa
 
 
 async def test_malformed_json_and_unknown_ids_return_safe_http_errors(tmp_path):
-    """Invalid JSON and opaque path components must not escape as server errors."""
+    """无效 JSON 与不透明路径组件不得以服务器错误的形式泄漏。"""
     async with running_client(tmp_path) as client:
         malformed = await client.post(
             "/api/runs", content="{", headers={"Content-Type": "application/json"}
@@ -291,7 +291,7 @@ async def test_malformed_json_and_unknown_ids_return_safe_http_errors(tmp_path):
     "origin", ["https://evil.example", "http://testserver:8001", "null", "not-an-origin"]
 )
 async def test_foreign_or_invalid_origins_cannot_create_runs(tmp_path, origin):
-    """An unrelated website cannot launch work on the local demo service."""
+    """无关网站不能在本地演示服务中启动工作。"""
     async with running_client(tmp_path) as client:
         response = await client.post(
             "/api/runs",
@@ -320,7 +320,7 @@ async def test_foreign_or_invalid_origins_cannot_create_runs(tmp_path, origin):
 
 
 async def test_report_escapes_untrusted_content_and_export_preserves_json(tmp_path):
-    """Shared reports render input as text while the JSON export remains lossless."""
+    """共享报告将输入按文本渲染，同时保持 JSON 导出无损。"""
     question = "<script>alert(1)</script><img src=x onerror=alert(2)> & revenue?"
     async with running_client(tmp_path) as client:
         run_id = await create_run(client, question=question)
@@ -342,7 +342,7 @@ async def test_report_escapes_untrusted_content_and_export_preserves_json(tmp_pa
 
 
 async def test_artifacts_require_same_run_attempt_and_recorded_reference(tmp_path):
-    """A recorded reference grants one scoped read, never directory access."""
+    """已记录的引用只授权一次限定范围的读取，不授权目录访问。"""
     async with running_client(tmp_path) as client:
         first_id = await create_run(client)
         first = await wait_stopped(client, first_id)
@@ -356,8 +356,8 @@ async def test_artifacts_require_same_run_attempt_and_recorded_reference(tmp_pat
         artifact = await client.get(f"{route}/{ref}")
         assert artifact.status_code == 200
         assert artifact.json()["call_id"] == event["call_id"]
-        # Plant an adjacent unreferenced JSON file: filename validity alone is
-        # insufficient authority to expose storage through the API.
+        # 在相邻位置放置一个未被引用的 JSON 文件：仅文件名有效
+        # 不足以授权通过接口暴露存储内容。
         files = list(tmp_path.rglob(f"{ref}.json"))
         assert len(files) == 1
         (files[0].parent / "unreferenced-test.json").write_text('{"private":true}')
@@ -376,7 +376,7 @@ async def test_artifacts_require_same_run_attempt_and_recorded_reference(tmp_pat
 
 
 async def test_capacity_rejects_extra_run_and_frees_slot_after_cancel(tmp_path, monkeypatch):
-    """Admission counts active owner tasks and cancellation returns their slots."""
+    """准入统计活跃的所有者任务，取消时归还对应名额。"""
     gate = InvokeGate(monkeypatch, expected=2)
     async with running_client(tmp_path, max_active_runs=2) as client:
         first_id = await create_run(client)
@@ -405,7 +405,7 @@ async def test_capacity_rejects_extra_run_and_frees_slot_after_cancel(tmp_path, 
 
 
 async def test_manual_cancel_does_not_bypass_unknown_outcome_recovery(tmp_path, monkeypatch):
-    """Cancelling after dispatch leaves unknown outcome refusal with no replay."""
+    """派发后取消会因调用结果未知而拒绝恢复，且不重放该调用。"""
     gate = InvokeGate(monkeypatch)
     async with running_client(tmp_path) as client:
         run_id = await create_run(client)
@@ -426,7 +426,7 @@ async def test_manual_cancel_does_not_bypass_unknown_outcome_recovery(tmp_path, 
 
 
 async def test_shutdown_drains_owned_tasks_and_retains_interrupted_history(tmp_path, monkeypatch):
-    """Closing the service must observe cancellation before releasing its store."""
+    """关闭服务时，必须先观察取消完成，再释放其存储。"""
     gate = InvokeGate(monkeypatch)
     baseline = asyncio.all_tasks()
     async with running_client(tmp_path) as client:

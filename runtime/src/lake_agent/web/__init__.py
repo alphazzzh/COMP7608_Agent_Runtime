@@ -1,5 +1,5 @@
-"""Optional local demonstration surface; the core runtime has no web dependency.
+"""可选的本地演示界面；核心运行时不依赖网页组件。
 
-Install the ``web`` extra and run ``lake-agent-web``. This package adapts the
-existing public run/resume APIs without acquiring controller execution rights.
+安装 ``web`` 扩展依赖后运行 ``lake-agent-web``。
+本包适配已有的公开 run/resume API，不获取控制器的执行权限。
 """

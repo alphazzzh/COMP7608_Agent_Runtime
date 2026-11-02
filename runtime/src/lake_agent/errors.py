@@ -1,20 +1,19 @@
-"""Internal stop reasons shared by sequential orchestration and tool execution.
+"""顺序编排与工具执行共用的内部停止原因。
 
-These exceptions describe controller termination, never caller cancellation or
-proof that an interrupted external operation did not execute.
+这些异常表示控制器终止，不表示调用方取消，也不能证明被中断的外部操作未曾执行。
 """
 
 
 class RunStopped(Exception):
-    """Carry a public run status/reason without swallowing CancelledError."""
+    """携带公开的运行状态与原因，同时不吞掉 CancelledError。"""
 
     def __init__(self, status: str, reason: str):
         self.status, self.reason = status, reason
         super().__init__(reason)
 
 
-# Trusted adapters may only request input correction for known safe failures.
-# These reserved codes cannot grant recovery even if marked recoverable.
+# 可信适配器只能对已知可安全处理的失败请求修正输入。
+# 以下保留错误码即使标记为 recoverable，也不能获得纠错恢复权限。
 FATAL_TOOL_CODES = frozenset(
     {
         "timeout",

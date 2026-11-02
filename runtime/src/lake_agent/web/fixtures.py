@@ -1,8 +1,8 @@
-"""Explicit synthetic scenarios for presenting the real harness control flow.
+"""用明确的合成场景展示真实执行框架的控制流程。
 
-All ports remain local. The parallel scenario opts two disjoint read operations
-into the core scheduler; no web-layer worker scheduling or model call is added.
-Answers quote the collected fixture payloads rather than imply live LLM output.
+所有端口均在本地运行。并行场景将两个互不冲突的只读操作显式交给核心调度器，
+不增加网页层工作线程调度或模型调用。
+答案引用实际收集到的合成载荷，不暗示这些内容来自在线 LLM 输出。
 """
 
 import asyncio
@@ -66,7 +66,7 @@ CAPABILITIES = [
 
 
 class ShowcaseData(DemoData):
-    """Read-only local ports with explicit parallelism and cooperative I/O waits."""
+    """只读本地端口，显式声明并发能力，并使用可协作取消的模拟 I/O 等待。"""
 
     def __init__(self, parallel=False):
         super().__init__()
@@ -79,14 +79,14 @@ class ShowcaseData(DemoData):
         ]
 
     async def invoke(self, request):
-        # A small simulated I/O wait makes the actual overlap observable in
-        # timestamps. It is a fixture property, never a harness speed claim.
+        # 一段短暂的模拟 I/O 等待，使真实的执行重叠能从时间戳中观察到。
+        # 这是测试替身的特性，不代表执行框架的性能结论。
         await asyncio.sleep(0.08 if request.args["source_id"] == "demo-annual" else 0.03)
         return await super().invoke(request)
 
 
 class ShowcasePlanner(DemoPlanner):
-    """Plan both independent sources only in the explicit parallel scenario."""
+    """仅在显式并行场景中，同时规划两个独立数据源。"""
 
     def __init__(self, parallel=False):
         self.parallel = parallel
@@ -117,7 +117,7 @@ class ShowcasePlanner(DemoPlanner):
 
 
 class ShowcaseContent(DemoContent):
-    """Expose the evidence actually collected, with honest offline output labels."""
+    """展示实际收集的证据，并明确标注离线输出的性质。"""
 
     async def compose(self, request):
         excerpts = [str(item.payload) for item in request.evidence]
@@ -134,6 +134,6 @@ class ShowcaseContent(DemoContent):
 
 
 def demo_ports(scenario):
-    """Return fresh instances; recovery must never rely on old transient handles."""
+    """返回新的实例；恢复不得依赖先前的临时句柄。"""
     parallel = scenario == "parallel"
     return ShowcaseData(parallel), ShowcaseContent(), ShowcasePlanner(parallel)

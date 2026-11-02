@@ -1,18 +1,16 @@
-"""Asynchronous, single-request JSON planner for OpenAI-compatible endpoints.
+"""面向 OpenAI 兼容端点的异步 JSON 规划器，每次规划只发送一个请求。
 
-This adapter only chooses subtasks or tool actions; it never executes tools,
-generates the final answer, retries, or reads evaluation labels. The runtime
-owns run budgets and validates plan semantics again before dispatching actions.
+本适配器只选择子任务或工具动作，不执行工具、生成最终答案、重试或读取评测标签。
+运行时负责管理运行预算，并在派发动作前再次校验计划语义。
 
-JSON mode is the portable default because arbitrary registered tool arguments
-cannot always be represented by a provider's restricted strict-schema subset.
-All responses are parsed as strict JSON and validated with the shared Pydantic
-models. Token-budget caps are rejected before dispatch: a generic endpoint does
-not establish a matching tokenizer or trustworthy usage capability.
+JSON 模式是通用默认值，因为任意已注册工具的参数未必能用服务商受限的严格模式
+子集表示。所有响应均按严格 JSON 解析，并通过共享的 Pydantic 模型校验。
+带 token 预算上限的请求会在派发前被拒绝：通用端点本身无法证明分词器匹配，
+也无法保证用量统计可信。
 
-The caller owns an injected HTTP client and must disable transport retries. An
-internally created client has retries and redirects explicitly disabled. Use
-``async with JsonPlanner(...)`` or ``await planner.aclose()`` to close it.
+注入的 HTTP 客户端由调用方管理，且必须禁用传输层重试。适配器自行创建的客户端
+会显式禁用重试和重定向。使用 ``async with JsonPlanner(...)`` 或
+``await planner.aclose()`` 关闭资源。
 """
 
 from __future__ import annotations
@@ -75,11 +73,11 @@ corresponding finish decision rather than inventing a tool action.
 
 
 class _ResponseTooLarge(Exception):
-    """Signal the bounded streaming reader to stop consuming provider output."""
+    """通知有界流式读取器停止读取服务商输出。"""
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Reject duplicate JSON keys rather than silently selecting the last one."""
+    """拒绝重复的 JSON 键，避免静默采用最后一个值。"""
     value: dict[str, Any] = {}
     for key, item in pairs:
         if key in value:
@@ -89,7 +87,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _reject_constant(value: str) -> None:
-    """Reject non-JSON NaN/Infinity tokens accepted by Python's default parser."""
+    """拒绝 Python 默认解析器接受、但不属于 JSON 的 NaN/Infinity 标记。"""
     raise ValueError(f"Invalid JSON constant: {value}")
 
 
@@ -98,17 +96,16 @@ def _strict_json(raw: str | bytes) -> Any:
 
 
 def _counter(value: Any) -> int | None:
-    """Unknown, malformed, and boolean usage counts must never become zero."""
+    """未知、格式错误或布尔类型的用量计数不得被解释为零。"""
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 class JsonPlanner:
-    """Implement PlannerPort using one asynchronous Chat Completions request.
+    """通过一次异步 Chat Completions 请求实现 PlannerPort。
 
-    ``base_url`` is an API root such as ``https://api.example.com/v1``. No
-    network request occurs until a planner method is awaited. One instance may
-    serve concurrent independent runs because all request state is local.
-    Close it only after all active calls have finished.
+    ``base_url`` 是 API 根地址，例如 ``https://api.example.com/v1``。
+    只有等待规划方法执行时才会发起网络请求。所有请求状态均保存在调用局部，
+    因此同一实例可以服务多个相互独立的并发运行。必须在所有活动调用结束后关闭实例。
     """
 
     supports_token_budgets = False
@@ -157,22 +154,22 @@ class JsonPlanner:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Idempotently release only resources created by this adapter."""
+        """以幂等方式释放本适配器自行创建的资源。"""
         if not self._closed:
             if self._owns_client:
                 await self._client.aclose()
-            # Commit closure after the await so a cancellation during cleanup
-            # does not prevent a later caller from retrying resource release.
+            # 等待清理完成后再标记关闭，避免清理途中取消后，
+            # 后续调用方无法再次尝试释放资源。
             self._closed = True
 
     async def decompose(self, request: PlannerRequest) -> ModuleResult[TaskPlan]:
-        """Choose evidence-gathering subtasks without receiving source content."""
+        """在不接收数据源正文的前提下，选择收集证据所需的子任务。"""
         return await self._invoke(request, _PLAN_ADAPTER, "decompose")
 
     async def select_tools(
         self, request: ToolPlanningRequest
     ) -> ModuleResult[ToolPlan | FinishDecision | ReadObservationDecision]:
-        """Choose registered actions or return an explicit finish decision."""
+        """选择已注册动作，或返回明确的结束决定。"""
         return await self._invoke(request, _TOOLS_ADAPTER, "select_tools")
 
     async def _invoke(
@@ -209,8 +206,8 @@ class JsonPlanner:
                 "Model parameters contain protected, unsupported, or invalid values.",
             )
 
-        # Send only functional inputs. Runtime IDs are for correlation and must
-        # not become a route for memorized benchmark labels or prompt content.
+        # 只发送功能所需的输入。运行时 ID 仅用于关联记录，
+        # 不得成为泄露已记忆基准标签或提示内容的通道。
         if isinstance(request, PlannerRequest):
             fields = ("question", "catalog_snapshot_id", "tool_specs", "budget_remaining")
         else:
@@ -254,8 +251,8 @@ class JsonPlanner:
             "n": 1,
         }
         try:
-            # Build before counting a physical dispatch so malformed local
-            # request values cannot consume or falsely report provider usage.
+            # 先构建请求，再计入实际派发次数，避免格式错误的本地
+            # 请求值消耗预算或虚报服务商用量。
             encoded = json.dumps(
                 body, ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).encode("utf-8")
@@ -266,8 +263,8 @@ class JsonPlanner:
                 "planner_input_too_large", "The full planner request exceeds its byte limit."
             )
 
-        # Count every dispatched request, including failures. Usage remains
-        # unknown until the provider supplies actual counters; never guess zero.
+        # 对每次已派发请求计数，包括失败请求。在服务商提供实际
+        # 计数之前，用量保持未知，绝不能猜成零。
         usage = Usage(provider_requests=1)
         try:
             async with asyncio.timeout(request.timeout_ms / 1000):
@@ -328,8 +325,8 @@ class JsonPlanner:
         except (TimeoutError, httpx.TimeoutException):
             return failure("provider_timeout", "The model request exceeded its call timeout.")
         except httpx.HTTPError:
-            # Never include exception messages, URLs with secrets, provider
-            # bodies, or Authorization headers in logs and result envelopes.
+            # 日志与结果封装中不得包含异常消息、带密钥的 URL、
+            # 服务商响应正文或 Authorization 请求头。
             return failure(
                 "provider_transport_error", "The model request failed in HTTP transport."
             )
@@ -351,7 +348,7 @@ class JsonPlanner:
 
     @staticmethod
     def _valid_params(params: dict[str, Any]) -> bool:
-        """Reject invalid controls before a provider request is dispatched."""
+        """在请求派发给服务商之前，拒绝无效的控制参数。"""
         for key, value in params.items():
             if key == "stop":
                 if isinstance(value, str):

@@ -1,14 +1,14 @@
-"""Build a portable, escaped HTML snapshot of one project's execution.
+"""为单个项目执行过程生成可移植且经过转义的 HTML 快照。
 
-The exported document has no scripts or remote resources. It contains only the
-same result, registered profile, evidence and audit visible in the workbench.
+导出文档不含脚本或远程资源，只包含工作台中可见的同一份结果、
+注册配置、证据与审计记录。
 """
 
 from html import escape
 
 
 def html_report(view):
-    """Escape every user/adapter value before embedding it in standalone HTML."""
+    """将用户和适配器的每个值转义后，再嵌入独立 HTML 文档。"""
 
     def text(value):
         return escape(str(value), quote=True)

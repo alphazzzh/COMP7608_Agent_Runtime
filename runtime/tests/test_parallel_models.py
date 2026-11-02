@@ -1,4 +1,4 @@
-"""Strict opt-in metadata and bounded concurrency configuration regressions."""
+"""严格显式启用的元数据与有界并发配置的回归测试。"""
 
 import pytest
 from pydantic import ValidationError

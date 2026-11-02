@@ -1,8 +1,8 @@
-"""Validate imported evaluation summaries and their private local persistence.
+"""验证导入的评估摘要及其私有本地持久化。
 
-These tests exercise the public repository/model boundary without web routes or
-model calls. Real files verify atomic visibility, permissions, safe identifiers,
-and cancellation drainage; malformed reports never become benchmark results.
+这些测试经过公开仓库与模型边界，不涉及 Web 路由或模型调用。
+真实文件用于验证原子可见性、权限、安全标识符与取消后的任务收尾；
+格式错误的报告绝不能成为基准评估结果。
 """
 
 import asyncio
@@ -23,12 +23,12 @@ from lake_agent.web.storage import WebError
 
 
 def evaluations():
-    """Import inside tests so the initial missing feature is a test failure."""
+    """在测试内部导入，使最初缺少功能表现为测试失败。"""
     return importlib.import_module("lake_agent.web.evaluations")
 
 
 def payload():
-    """A caller-authored report deliberately leaves all quality metrics unknown."""
+    """调用方编写的报告刻意将所有质量指标保留为未知。"""
     return {
         "title": "Verified task set",
         "dataset_id": "course-pool-v1",
@@ -123,8 +123,8 @@ async def test_copied_model_cannot_admit_an_overlong_timestamp(tmp_path):
     report = module.EvaluationImport.model_validate(payload()).model_copy(
         update={"evaluated_at": "2026-11-02T08:30:00." + "1" * 39 + "+08:00"}
     )
-    # model_copy intentionally skips validation; create must still reject it
-    # before publishing anything, including an atomically complete bad record.
+    # model_copy 刻意跳过校验；create 仍须在发布任何内容之前拒绝它，
+    # 即使该无效记录能够以原子方式完整写入，也不能发布。
     with pytest.raises(ValidationError):
         await repository.create(report)
     assert await repository.listing() == []
@@ -135,8 +135,8 @@ async def test_create_cannot_exceed_the_repository_read_limit(tmp_path, monkeypa
     module = evaluations()
     repository = module.EvaluationRepository(tmp_path)
     await repository.start()
-    # A smaller storage cap makes the write/read invariant observable using a
-    # valid public report, independently of future changes to model field bounds.
+    # 使用更小的存储上限和有效公开报告来观察写入后必可读取的不变量，
+    # 使该检查独立于未来模型字段边界的变化。
     monkeypatch.setattr(module, "_MAX_RECORD_BYTES", 64)
     with pytest.raises(WebError) as caught:
         await repository.create(module.EvaluationImport.model_validate(payload()))
@@ -274,7 +274,7 @@ async def test_listing_returns_only_the_latest_hundred_reports(tmp_path):
             "imported_at": f"2026-11-02T00:00:{index // 2:02d}.{index:06d}+00:00",
         }
         (tmp_path / "evaluations" / f"{identity}.json").write_text(json.dumps(value))
-    # A symlink or unrelated filename must not cause a scan outside the folder.
+    # 符号链接或无关文件名不得使扫描越出目录。
     (tmp_path / "evaluations" / "notes.json").write_text("not a report")
     rows = await repository.listing()
     assert len(rows) == 100
@@ -356,7 +356,7 @@ async def test_cancelled_create_drains_the_atomic_worker(tmp_path, monkeypatch):
         async with asyncio.timeout(3):
             await entered.wait()
         worker.cancel()
-        # A cancelled owner remains alive while its filesystem worker is held.
+        # 文件系统工作任务受阻时，被取消的所有者仍须保持存活以完成收尾。
         await asyncio.sleep(0)
         assert not worker.done()
         assert await repository.listing() == []

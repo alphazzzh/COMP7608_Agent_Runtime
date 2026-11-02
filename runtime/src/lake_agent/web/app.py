@@ -1,8 +1,8 @@
-"""FastAPI entry point for the optional local data-pool project workspace.
+"""可选本地数据池项目工作区的 FastAPI 入口。
 
-The HTTP layer validates input and delegates to DemoService. The CLI binds only
-loopback. Same-origin writes, a restrictive browser policy, fixed static routes
-and reference-scoped artifact reads keep this local presentation surface small.
+HTTP 层校验输入后委托 DemoService 处理。命令行入口仅绑定回环地址。
+同源写入限制、严格的浏览器策略、固定静态路由和按引用限定的工件读取，
+共同控制此本地展示界面的访问范围。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _STATIC = Path(__file__).with_name("static")
 
 
 class StartRun(m.Model):
-    """Accept presentation choices only; no credentials, code or external paths."""
+    """只接受展示选项，不接收凭据、代码或外部路径。"""
 
     question: Annotated[str, Field(min_length=1, max_length=2000)]
     scenario: Literal["standard", "parallel", "recovery"] | None = None
@@ -40,7 +40,7 @@ class StartRun(m.Model):
 
 
 def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
-    """Create a single-owner application with caller-selected local storage."""
+    """使用调用方指定的本地存储创建单一所有者应用。"""
     service = DemoService(
         data_dir or Path.cwd() / "runs" / "web-demo", max_active_runs, profiles=profiles
     )
@@ -110,8 +110,8 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(request, error):
-        # Pydantic error inputs may contain caller text. A fixed response avoids
-        # echoing it into operational logs or HTML error displays.
+        # Pydantic 错误输入可能包含调用方文本。固定响应可避免将这些文本
+        # 回显到运维日志或 HTML 错误界面中。
         return JSONResponse(
             {
                 "detail": {
@@ -152,8 +152,8 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.post("/api/evaluations", status_code=201)
     async def evaluation_import(request: Request):
-        # Count streamed bytes before JSON decoding. Content-Length alone does
-        # not bound chunked requests or malformed client declarations.
+        # JSON 解码前先统计流式读取的字节。单靠 Content-Length 无法限制
+        # 分块请求，也无法应对客户端声明有误的情况。
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > 131_072:
@@ -171,7 +171,7 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.get("/api/evaluations/template")
     async def evaluation_template():
-        # This is an import template, never a persisted or measured score.
+        # 这里只提供导入模板，不代表已持久化或实测的分数。
         report = EvaluationImport.model_validate(
             {
                 "title": "填写评估报告名称",
@@ -195,9 +195,9 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
     @app.get("/api/evaluations/{evaluation_id}")
     async def evaluation_detail(evaluation_id: str):
         report = await service.evaluations.get(evaluation_id)
-        # Declare downloads server-side as well as on the anchor. Embedded
-        # browsers can ignore the download attribute; fetch still reads JSON.
-        # get() validates the persisted identity before it enters this header.
+        # 链接和服务端都声明下载行为。内嵌浏览器可能忽略 download 属性；
+        # fetch 仍按 JSON 读取响应。
+        # get() 会先校验持久化记录的身份，再将其写入此响应头。
         return JSONResponse(
             report,
             headers={
@@ -265,7 +265,7 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
 
 def main():
-    """Start a local single-worker server; data and port are caller-controlled."""
+    """启动本地单工作进程服务器；数据位置与端口由调用方控制。"""
     import uvicorn
 
     parser = argparse.ArgumentParser(

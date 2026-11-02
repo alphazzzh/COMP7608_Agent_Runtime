@@ -1,14 +1,12 @@
-"""Controller-owned bounded tool waves, with isolated I/O workers.
+"""由控制器管理有界工具批次，并隔离 I/O 工作任务。
 
-Only DataPort.invoke runs in child tasks. Admission, budgets, intent/result
-artifacts, observations, evidence and step transitions stay on the serial
-coordinator. A wave drains before retries or downstream work are admitted;
-physical completion timing never chooses semantic commit order.
+只有 DataPort.invoke 在子任务中运行。准入、预算、意图与结果工件、观察记录、证据
+和步骤状态转移均留在串行协调器中。一个批次须全部结束后才允许重试或下游工作；
+实际完成时序不能决定语义提交顺序。
 
-The mixin uses the controller's existing audit, provenance and deadline helpers.
-It does not own the event loop or adapter resources, start model calls, or infer
-parallel safety from idempotence. Child cancellation is cooperative and every
-owned task is observed before control returns to run finalization.
+混入类复用控制器现有的审计、来源追踪和截止时间辅助方法，不管理事件循环或适配器
+资源、不发起模型调用，也不从幂等性推断并行安全性。子任务取消依赖协作；
+在返回运行收尾流程前，必须等待全部自有任务结束并获取其结果或异常。
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ def _meta(request):
 
 
 class ToolExecutionMixin:
-    """Run-local tool state and serial coordination for an accepted ToolPlan."""
+    """为已接受的 ToolPlan 管理单次运行内的工具状态并进行串行协调。"""
 
     def _init_tool_execution(self):
         self.pending_tool_calls: dict[str, dict] = {}
@@ -47,17 +45,16 @@ class ToolExecutionMixin:
         self.tool_step_terminal: dict[str, str] = {}
 
     async def _tool_step_state(self, step_id, status):
-        """Remember committed terminal states so later budget failures cannot undo them."""
+        """记录已提交的步骤终态，防止后续预算失败撤销这些终态。"""
         await self._event("step.state", step_id=step_id, status=status)
         if status != "running":
             self.tool_step_terminal[step_id] = status
 
     def _sync_tool_dispatches(self):
-        """Settle physical dispatch counters even when a wave is cancelled.
+        """即使批次被取消，也要结算实际派发计数。
 
-        Workers mutate only their own attempt records. Counts are reconciled by
-        the coordinator, once per logical step/physical retry. A committed intent
-        consumes a physical-call reservation but is not itself a logical invoke.
+        工作任务仅修改各自的尝试记录。协调器对每个逻辑步骤和实际重试各核算一次。
+        已提交意图会占用一次实际调用预留，但其本身不代表逻辑工具调用已经发生。
         """
         for call_id, attempt in self.tool_attempts.items():
             request = attempt.request
@@ -76,7 +73,7 @@ class ToolExecutionMixin:
                 )
 
     def _call_snapshots(self):
-        """Plural identities are authoritative; singular fields remain compatible."""
+        """以复数调用标识字段为准，单数形式字段继续保留以兼容已有使用方。"""
         self._sync_tool_dispatches()
         pending = ([self.pending_call] if self.pending_call else []) + list(
             self.pending_tool_calls.values()
@@ -92,7 +89,7 @@ class ToolExecutionMixin:
         )
 
     async def _prepare_tool_attempt(self, step, operation_id, number):
-        """Reserve one physical attempt and commit intent before any adapter I/O."""
+        """在任何适配器 I/O 前预留一次实际调用尝试并提交意图。"""
         self._time()
         if self.counts.catalog + self.counts.tools >= self.cfg.max_data_calls:
             raise RunStopped("budget_exceeded", "data_call_budget")
@@ -117,8 +114,8 @@ class ToolExecutionMixin:
         try:
             await self._event("tool.call.started", data_ref=ref, **meta)
         except asyncio.CancelledError:
-            # An interrupted append has an uncertain commit outcome. Retain
-            # the physical reservation, but no worker has been dispatched.
+            # 追加被打断时，提交结果可能未知。保留实际调用预留，
+            # 但此时尚未派发任何工作任务。
             raise
         except RunStopped:
             self.counts.tools -= 1
@@ -146,7 +143,7 @@ class ToolExecutionMixin:
         return attempt
 
     async def _gather_tool_attempts(self, entries):
-        """Launch bounded attempts and observe every child on every exit path."""
+        """启动数量受限的尝试，并在每条退出路径上等待所有子任务结束。"""
         attempts, tasks = [], []
         try:
             if self.recovery is not None:
@@ -156,8 +153,8 @@ class ToolExecutionMixin:
                     await self._tool_step_state(step.step_id, "running")
                 attempt = await self._prepare_tool_attempt(step, operation_id, number)
                 attempts.append(attempt)
-            # Atomic wave admission: no adapter starts until every selected
-            # intent is durably committed. A preparation failure dispatches none.
+            # 整批准入具有原子性：所有选中意图持久化提交前，不启动任何适配器。
+            # 准备失败时不派发任何调用。
             if self.recovery is not None:
                 await self.recovery.admit_wave(attempts)
             for attempt in attempts:
@@ -181,9 +178,9 @@ class ToolExecutionMixin:
             await asyncio.gather(*tasks)
             return attempts
         finally:
-            # Preparation failures have no dispatched workers. Once a wave
-            # starts, drain every child on all exits before trace finalization,
-            # including a second cancellation during cleanup.
+            # 准备失败时尚未派发工作任务。批次一旦启动，
+            # 所有退出路径都要在追踪收尾前等待全部子任务结束，
+            # 包括清理期间发生第二次取消的情况。
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -200,7 +197,7 @@ class ToolExecutionMixin:
             self._sync_tool_dispatches()
 
     async def _settle_tool_attempt(self, attempt):
-        """Commit a captured reply/failure; return policy data without dispatching."""
+        """提交已捕获的响应或失败，返回策略判断所需数据，不派发调用。"""
         outcome, request = attempt.outcome, attempt.request
         assert outcome is not None
         meta = _meta(request)
@@ -253,7 +250,7 @@ class ToolExecutionMixin:
         return None, error, reason
 
     async def _apply_tool_evidence(self, step, result):
-        """Validate provenance before promoting explicit evidence into run state."""
+        """在将显式证据纳入运行状态前验证其来源关系。"""
         try:
             raw = result.data.get("evidence", [])
             if not isinstance(raw, list) or (
@@ -280,7 +277,7 @@ class ToolExecutionMixin:
         self.visited.update(step.source_ids)
 
     def _tool_failure_policy(self, step, attempt, result, error, hard_stop):
-        """Retry safe physical attempts first; recovery is a separate new decision."""
+        """优先重试安全的实际调用尝试；可恢复错误交由新的规划决策处理。"""
         if (
             self.specs[step.tool_name].idempotent
             and error.retryable
@@ -308,22 +305,22 @@ class ToolExecutionMixin:
         return "stop", RunStopped("failed", reason)
 
     async def _execute_tool_wave(self, wave):
-        """Settle already-started siblings before deciding to retry/replan/stop."""
+        """先结算已启动的同批任务，再决定重试、重新规划或停止。"""
         entries = [(step, self._id("op"), 1) for step in wave]
         succeeded, failed = set(), set()
         while entries:
-            # Retry attempts compete for the same physical budget as first
-            # attempts. Admit only a complete affordable subwave; later retries
-            # must not strand an earlier committed intent without dispatch.
+            # 重试与首次尝试竞争同一个实际调用预算。
+            # 仅允许完整且预算足够的子批次准入；后续重试
+            # 不得使此前已提交的意图搁置而无法派发。
             remaining = self.cfg.max_data_calls - self.counts.catalog - self.counts.tools
             if remaining <= 0:
                 raise RunStopped("budget_exceeded", "data_call_budget")
             width = min(self.cfg.max_parallel_tool_calls, remaining)
             entries, deferred = entries[:width], entries[width:]
             attempts = await self._gather_tool_attempts(entries)
-            # Global termination can interrupt normal result persistence. Keep
-            # every buffered outcome in the plural call snapshot for auditing;
-            # never misreport an unknown/buffered call as not executed.
+            # 全局终止可能打断正常结果持久化。将所有已缓冲结果
+            # 保留在复数调用快照中供审计，
+            # 绝不能把结果未知或已缓冲的调用误报为未执行。
             self._time()
             retry, final_stops, recover = [], [], []
             for (step, operation_id, number), attempt in zip(entries, attempts, strict=True):
@@ -356,9 +353,9 @@ class ToolExecutionMixin:
                 else:
                     final_stops.append(stop)
             if final_stops or recover:
-                # A sibling failed: retrying other operations would be new
-                # dispatch after the wave's stop decision. Their last explicit
-                # errors remain committed, and these logical steps fail too.
+                # 同批任务失败后，重试其他操作会成为本批停止决策后的
+                # 新增派发。它们最后一次明确错误保持已提交状态，
+                # 这些逻辑步骤也标记为失败。
                 for step, _, _, _ in retry:
                     failed.add(step.step_id)
                     await self._tool_step_state(step.step_id, "failed")
@@ -391,7 +388,7 @@ class ToolExecutionMixin:
         return succeeded, failed, None
 
     async def _close_unstarted_tool_steps(self, steps, failed):
-        """Blocked descendants and unrelated skipped work never look executed."""
+        """将受阻的后继步骤及无关的跳过步骤明确标记为未执行。"""
         failed = set(failed)
         for step in steps:
             if step.step_id in self.tool_step_terminal:
@@ -402,7 +399,7 @@ class ToolExecutionMixin:
             await self._tool_step_state(step.step_id, "blocked" if blocked else "skipped")
 
     async def _dispatch_tool_plan(self, steps):
-        """Select stable ready waves within capability, resource and budget limits."""
+        """在能力、资源和预算约束内，按稳定顺序选择就绪批次。"""
         pending, succeeded = list(steps), set()
         try:
             while pending:
@@ -415,8 +412,8 @@ class ToolExecutionMixin:
                 )
                 if not wave:
                     raise RunStopped("failed", "invalid_plan")
-                # Check the whole selected wave before dispatch. Internal
-                # physical retries never revisit these logical action counts.
+                # 派发前检查整个选中批次。内部实际重试
+                # 不再重复增加这些逻辑操作计数。
                 signatures = dict(self.action_counts)
                 for step in wave:
                     signature = hashlib.sha256(
@@ -445,9 +442,9 @@ class ToolExecutionMixin:
                     return
         except RunStopped:
             if pending and self.loop.time() < self.deadline and not self.trace_broken:
-                # A later retry's preparation/budget failure must preserve
-                # earlier successful commits. Unsettled attempts remain visible
-                # in the plural snapshots rather than being treated as absent.
+                # 后续重试的准备或预算失败，必须保留此前成功提交的结果。
+                # 未结算尝试仍出现在复数调用快照中，
+                # 不得视为不存在。
                 started = {
                     attempt.request.step_id
                     for attempt in self.tool_attempts.values()

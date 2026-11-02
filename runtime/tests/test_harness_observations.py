@@ -1,8 +1,8 @@
-"""Offline integration regressions for the controller's tool-observation loop.
+"""控制器工具观测循环的离线集成回归测试。
 
-These tests exercise the public ``run`` entry point and its persisted artifacts.
-Only the external data/content/planner ports are deterministic local fixtures;
-no network, model credentials or production-private controller APIs are needed.
+这些测试经过公开的 ``run`` 入口及其持久化产物。
+只有外部数据、内容和规划端口使用确定性的本地测试替身；
+无需网络、模型凭据或控制器的生产私有接口。
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ from lake_agent.trace import JsonlTraceSink
 
 
 def reply(request, payload):
-    """Return a normal local module result with explicit zero provider use."""
+    """返回普通的本地模块结果，并明确声明提供方用量为零。"""
     return m.ModuleResult(call_id=request.call_id, data=payload, usage=m.Usage.local())
 
 
 def step(request, tool_name, *, suffix="", table="annual", depends_on=None):
-    """Build authorized actions; each new plan deliberately gets fresh step IDs."""
+    """构造已授权的动作；每个新计划刻意使用全新的步骤 ID。"""
     args = {"source_id": "demo-annual"}
     if tool_name == "query":
         args["table"] = table
@@ -40,7 +40,7 @@ def step(request, tool_name, *, suffix="", table="annual", depends_on=None):
 
 
 class InspectQueryData(DemoData):
-    """A source whose schema is useful for planning but is never evidence."""
+    """其模式可辅助规划、但自身始终不作为证据的数据源。"""
 
     def __init__(self, *, schema=None, payload="Annual revenue: 120 million HKD."):
         super().__init__()
@@ -93,7 +93,7 @@ class InspectQueryData(DemoData):
 
 
 class RecordingContent(DemoContent):
-    """Retain real compose/verify inputs to check full evidence preservation."""
+    """保留真实的 compose/verify 输入，以检查证据是否完整保留。"""
 
     def __init__(self):
         super().__init__()
@@ -110,7 +110,7 @@ class RecordingContent(DemoContent):
 
 
 async def execute(tmp_path, *, planner, data=None, content=None, mode="no_verifier", **config):
-    """Run the real controller with filesystem traces and independent local ports."""
+    """使用文件系统轨迹与相互独立的本地端口运行真实控制器。"""
     return await run(
         m.RunRequest(
             task_id="observation-integration",
@@ -130,12 +130,12 @@ def events(result):
 
 
 def canonical(value):
-    """Measure the specified JSON wire format, including non-ASCII UTF-8 bytes."""
+    """测量约定的 JSON 传输格式大小，包括非 ASCII 字符的 UTF-8 字节。"""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 class QueryThenFinish(DemoPlanner):
-    """Collect requests while obtaining exactly one evidence-bearing result."""
+    """收集请求，同时恰好取得一个携带证据的结果。"""
 
     def __init__(self):
         self.requests = []
@@ -186,8 +186,8 @@ async def test_inspect_schema_is_visible_to_next_planner_and_query_supplies_evid
 async def test_planner_context_is_byte_bounded_while_compose_and_verify_keep_full_evidence(
     tmp_path,
 ):
-    # Multi-byte characters catch implementations that bound Python characters
-    # rather than the promised UTF-8 canonical JSON transport size.
+    # 多字节字符用于发现按 Python 字符数限长的错误实现；约定的边界
+    # 实际是 UTF-8 编码的规范 JSON 传输字节数。
     payload = "香港年度收入資料。" * 1200
     planner, content = QueryThenFinish(), RecordingContent()
     result = await execute(

@@ -1,3 +1,3 @@
-"""Async data-pool harness; adapters own data parsing and answer generation."""
+"""异步数据池执行框架；数据解析与答案生成由适配器负责。"""
 
 __version__ = "0.7.0"

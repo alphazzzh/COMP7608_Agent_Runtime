@@ -1,8 +1,7 @@
-"""Provider boundary regressions for observation-aware planning and input limits.
+"""支持观测的规划与输入限制在提供方边界上的回归测试。
 
-The tests use the real JsonPlanner with an HTTP transport stub. They check the
-bytes sent to the provider, local rejection before dispatch, and new decisions;
-no network credentials or external service are involved.
+测试使用真实的 JsonPlanner 与 HTTP 传输桩，检查发送给提供方的字节、
+派发前的本地拒绝，以及后续的新决策；不涉及网络凭据或外部服务。
 """
 
 import json
@@ -16,7 +15,7 @@ from lake_agent.planner import JsonPlanner
 
 
 def planning_request():
-    """A small realistic request containing observations distinct from evidence."""
+    """构造一个小型真实请求，其中的观测与证据相互区分。"""
     return m.ToolPlanningRequest(
         run_id="private-run",
         task_id="private-task",
@@ -98,7 +97,7 @@ async def test_full_request_byte_limit_rejects_before_provider_dispatch():
 
 
 async def test_full_request_byte_limit_accepts_exact_utf8_boundary_and_rejects_one_byte_less():
-    """Unicode and JSON escaping must fit the actual body sent over HTTP."""
+    """Unicode 字符与 JSON 转义后的大小必须符合实际 HTTP 请求体的限制。"""
     dispatched = []
 
     def respond(request):

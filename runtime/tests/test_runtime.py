@@ -1,4 +1,4 @@
-"""Controller acceptance tests exercise observable behavior, budgets and cancellation."""
+"""控制器验收测试覆盖可观测行为、预算与取消。"""
 
 import asyncio
 import json
@@ -41,7 +41,7 @@ async def test_three_modes_persist_cited_answer(tmp_path, mode, reason, models):
     assert result.status == "completed"
     assert result.stop_reason == reason
     assert result.answer.citations
-    assert result.call_counts.model_calls == models  # Offline stubs never call a provider.
+    assert result.call_counts.model_calls == models  # 离线桩从不调用提供方。
     trace_text = await asyncio.to_thread(Path(result.trace_ref).read_text)
     events = [json.loads(line) for line in trace_text.splitlines()]
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))

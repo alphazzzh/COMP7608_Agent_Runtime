@@ -1,4 +1,4 @@
-"""Independent regressions for controller deadline and cleanup boundaries."""
+"""控制器截止时间与清理边界的独立回归测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from lake_agent.runtime import run
 
 
 class MemoryTrace:
-    """Cooperative recording sink for tests that isolate controller scheduling."""
+    """用于隔离控制器调度行为的协作式记录接收器。"""
 
     def __init__(self):
         self.events = []
@@ -134,8 +134,8 @@ async def test_late_adapter_return_cannot_be_accepted_after_call_deadline():
             try:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
-                # Python cancellation is cooperative: an adapter can suppress
-                # it, but a late result still cannot become a successful call.
+                # Python 取消采用协作机制，适配器可以抑制取消，
+                # 但迟到的结果仍不能将该调用变为成功。
                 return await super().catalog(req)
 
     result = await run(
@@ -676,15 +676,15 @@ async def test_verifier_feedback_targets_declared_subtask():
 async def test_feedback_reconciles_completed_subtasks(
     initial_reason, feedback_reason, initial_completed, feedback_completed
 ):
-    """Compose sees current success states in DAG order after every feedback pass."""
+    """每轮反馈后，compose 均按有向无环图顺序接收当前成功状态。"""
 
     class ReplanningFixture(DemoPlanner):
         def __init__(self):
             self.selections = {}
 
         async def decompose(self, req):
-            # Input order differs from execution order: leading must run first,
-            # then target and trailing. A recovered target belongs in the middle.
+            # 输入顺序不同于执行顺序：必须先运行 leading，
+            # 再运行 target 和 trailing。恢复成功的 target 应处于中间。
             return m.ModuleResult(
                 call_id=req.call_id,
                 data=m.TaskPlan(

@@ -1,9 +1,8 @@
-"""Trusted server-side bindings between data pools and fresh execution ports.
+"""在服务端可信地绑定数据池与新建的执行端口。
 
-Only declarative metadata reaches the browser. Factories and credentials remain
-in the hosting process; each run or recovery enters a new async context whose
-owner closes its clients. The signature pins a run to its registered data and
-configuration without replacing the core's stricter recovery validation.
+浏览器只接收声明式元数据。工厂函数与凭据留在宿主进程中；
+每次运行或恢复都会进入新的异步上下文，由其所有者关闭客户端。
+签名将运行绑定到已注册的数据与配置，但不替代核心更严格的恢复校验。
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ _Label = Annotated[str, Field(min_length=1, max_length=200)]
 
 
 class ModuleState(m.Model):
-    """Explain which implementation supplies one part of an execution."""
+    """说明执行中的某一部分由哪个实现提供。"""
 
     status: Literal["connected", "fixture", "unavailable"]
     label: _Label
@@ -40,7 +39,7 @@ class ModuleConnections(m.Model):
 
 
 class ProfileMetadata(m.Model):
-    """Public, bounded configuration identity; never a place for credentials."""
+    """公开且受大小限制的配置身份信息，不得用于存放凭据。"""
 
     profile_id: _Id
     title: _Label
@@ -57,7 +56,7 @@ class ProfileMetadata(m.Model):
 
 @dataclass(frozen=True)
 class ExecutionPorts:
-    """One attempt's adapters; resource ownership stays with its factory."""
+    """一次尝试所用的适配器；资源所有权保留在其工厂中。"""
 
     data: DataPort
     content: ContentPort
@@ -66,12 +65,12 @@ class ExecutionPorts:
 
 @dataclass(frozen=True)
 class ExecutionProfile:
-    """Register a pool without exposing code loading or paths over HTTP.
+    """注册数据池，不通过 HTTP 暴露代码加载能力或路径。
 
-    Increment metadata.revision when adapter behavior or data identity changes.
-    Sources are an optional published directory, not an implicit tool call or a
-    promise that the whole pool has been enumerated. RunConfig remains trusted
-    server policy; browser callers cannot increase budgets.
+    适配器行为或数据身份改变时，须递增 metadata.revision。
+    sources 是可选的已发布数据源目录，不会隐式调用工具，
+    也不保证已枚举整个数据池。RunConfig 仍是可信的服务端策略；
+    浏览器调用方不能提高预算。
     """
 
     metadata: ProfileMetadata
@@ -81,8 +80,8 @@ class ExecutionProfile:
     pause_after_evidence: bool = False
 
     def __post_init__(self):
-        # Detach the registration from mutable input models. Per-run copies
-        # below also prevent an adapter from modifying a sibling's config.
+        # 将注册信息与可变输入模型分离。下面为每次运行生成的副本，
+        # 也可防止适配器修改其他运行的配置。
         object.__setattr__(self, "metadata", self.metadata.model_copy(deep=True))
         object.__setattr__(self, "run_config", self.run_config.model_copy(deep=True))
         values = tuple(source.model_copy(deep=True) for source in self.sources)
@@ -109,7 +108,7 @@ class ExecutionProfile:
         }
 
     def signature(self):
-        """Pin all declared adapter/data/config identity, excluding callables."""
+        """固定已声明的适配器、数据与配置身份，不纳入可调用对象。"""
         return sha256(
             canonical_json(
                 {
@@ -123,7 +122,7 @@ class ExecutionProfile:
 
 
 class ProfileRegistry:
-    """A fixed trusted registry; HTTP never imports or constructs adapters."""
+    """固定的可信注册表；HTTP 层不导入或构造适配器。"""
 
     def __init__(self, profiles: Sequence[ExecutionProfile] | None = None):
         entries = default_profiles() if profiles is None else list(profiles)
@@ -165,7 +164,7 @@ class ProfileRegistry:
 
 
 def default_profiles():
-    """Keep the project slot explicit and examples runnable without networking."""
+    """显式保留项目配置入口，并让示例可在无网络环境下运行。"""
     pending = ModuleState(status="unavailable", label="尚未接入")
     profiles = [
         ExecutionProfile(

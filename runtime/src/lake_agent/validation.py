@@ -1,9 +1,8 @@
-"""Local JSON Schema, source authorization and dependency validation.
+"""本地 JSON Schema、数据源授权和依赖关系校验。
 
-These checks run before any tool action is dispatched.  Tool parameters remain
-owned by the data adapter, while this module validates their declared schema
-and extracts every explicitly registered source ID.  Remote schema references
-are deliberately rejected: validating untrusted metadata must never fetch URLs.
+所有检查均在工具动作派发前执行。工具参数仍由数据适配器定义，
+本模块校验参数声明的模式，并提取每个显式注册的数据源 ID。
+远程模式引用会被明确拒绝：校验不可信元数据时绝不能获取 URL 内容。
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ T = TypeVar("T")
 
 
 def _json_native(value: Any) -> Any:
-    """Normalize Pydantic records and reject values JSON would silently coerce."""
+    """规范化 Pydantic 记录，并拒绝会被 JSON 静默转换类型的值。"""
     if isinstance(value, BaseModel):
         return _json_native(value.model_dump(mode="json"))
     if value is None or type(value) in (str, bool, int):
@@ -40,7 +39,7 @@ def _json_native(value: Any) -> Any:
 
 
 def canonical_json(value: Any) -> bytes:
-    """Return compact sorted UTF-8 JSON for byte limits and reproducible hashes."""
+    """返回键排序、格式紧凑的 UTF-8 JSON，用于字节限制与可复现哈希。"""
     normalized = _json_native(value)
     try:
         return json.dumps(
@@ -51,7 +50,7 @@ def canonical_json(value: Any) -> bytes:
 
 
 def catalog_digest(sources: Iterable[SourceRecord]) -> str:
-    """Hash the full catalog after ordering by stable source ID."""
+    """先按稳定的数据源 ID 排序，再对完整目录计算哈希。"""
     records = sorted(sources, key=lambda source: source.source_id)
     if len({source.source_id for source in records}) != len(records):
         raise ValueError("catalog source IDs must be unique")
@@ -59,7 +58,7 @@ def catalog_digest(sources: Iterable[SourceRecord]) -> str:
 
 
 def _tokens(pointer: str) -> list[str]:
-    """Decode JSON Pointer tokens; '*' is an extension for array elements."""
+    """解码 JSON Pointer 标记；'*' 是用于数组元素的扩展语法。"""
     if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
         raise ValueError("source path must be a non-root JSON Pointer")
     return [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
@@ -78,7 +77,7 @@ def _check_local_references(node: Any) -> None:
 
 
 def _dereference(node: Any, root: dict[str, Any]) -> dict[str, Any]:
-    """Resolve ordinary local pointer refs without network or recursive loops."""
+    """解析普通的本地指针引用，避免网络访问与递归循环。"""
     visited: set[str] = set()
     while isinstance(node, dict) and "$ref" in node:
         ref = node["$ref"]
@@ -92,8 +91,8 @@ def _dereference(node: Any, root: dict[str, Any]) -> dict[str, Any]:
             target = target[token]
         if not isinstance(target, dict):
             raise ValueError("source metadata reference must resolve to an object schema")
-        # Ref siblings add constraints in Draft 2020-12.  Source metadata should
-        # be unambiguous; reject structural siblings instead of guessing merges.
+        # Draft 2020-12 中，引用的同级字段会增加约束。数据源元数据应保持
+        # 无歧义，因此直接拒绝结构性同级字段，不猜测约束合并方式。
         if any(key not in {"$ref", "description", "title", "$comment"} for key in node):
             raise ValueError("source path schemas cannot combine $ref and structural siblings")
         node = target
@@ -128,17 +127,16 @@ def _check_schema_path(schema: dict[str, Any], pointer: str) -> None:
 
 
 def validate_tool_specs(specs: Iterable[ToolSpec]) -> dict[str, ToolSpec]:
-    """Validate the entire static capability registry before accepting it.
+    """在接纳静态能力注册表之前，对整个注册表进行校验。
 
-    Validation is intentionally conservative for source path shape: object
-    properties and homogeneous arrays, including local $defs, are supported.
-    Conditional/union source locations should be represented as separate tools
-    until a future contract version explicitly defines conditional metadata.
+    数据源路径结构的校验有意保持保守：支持对象属性、同类型元素数组，以及本地 $defs。
+    对于条件分支或联合类型中的数据源位置，应拆分为独立工具，
+    直到未来的契约版本明确规定条件元数据的语义。
     """
     registered: dict[str, ToolSpec] = {}
     for incoming in specs:
-        # model_copy(update=...) bypasses Pydantic validation. Revalidate and
-        # detach adapter records before trusting concurrency/resource claims.
+        # model_copy(update=...) 会绕过 Pydantic 校验。信任并发与资源声明前，
+        # 须重新校验适配器记录，并创建与原记录独立的副本。
         payload = (
             incoming.model_dump(mode="json", warnings=False)
             if isinstance(incoming, BaseModel)
@@ -166,11 +164,10 @@ def validate_tool_specs(specs: Iterable[ToolSpec]) -> dict[str, ToolSpec]:
 
 
 def source_ids_for(spec: ToolSpec, args: dict[str, Any]) -> set[str]:
-    """Validate tool arguments, then extract registered source IDs exactly.
+    """先校验工具参数，再精确提取注册的数据源 ID。
 
-    Wildcards expand only arrays.  Missing values, wrong types and empty source
-    strings fail closed.  The caller compares this set with ToolStep.source_ids
-    and the current candidate/evidence authorization set.
+    通配符只展开数组。值缺失、类型错误或数据源字符串为空时，均拒绝继续。
+    调用方将所得集合与 ToolStep.source_ids 及当前候选源和证据的授权集合比较。
     """
     try:
         canonical_json(args)
@@ -182,8 +179,8 @@ def source_ids_for(spec: ToolSpec, args: dict[str, Any]) -> set[str]:
     except (ValidationError, SchemaError) as exc:
         raise ValueError("tool arguments do not match their registered schema") from exc
     except Exception as exc:
-        # The registry normally rejects unresolved refs first.  Adapters calling
-        # this helper directly must still receive one predictable local failure.
+        # 注册表通常会先拒绝未解析的引用。适配器直接调用本辅助函数时，
+        # 也应获得一致且可预期的本地错误。
         raise ValueError("tool arguments or schema cannot be validated") from exc
     found: set[str] = set()
     for pointer in spec.source_id_paths:
@@ -207,10 +204,10 @@ def source_ids_for(spec: ToolSpec, args: dict[str, Any]) -> set[str]:
 
 
 def validate_dag(items: Iterable[T], id_field: str) -> list[T]:
-    """Return deterministic depth-first topological order, rejecting bad DAGs.
+    """返回确定性的深度优先拓扑序，并拒绝无效的有向无环图。
 
-    Preserve each input item's order wherever dependencies permit it.  An
-    iterative walk avoids Python recursion depth limits for adapter inputs.
+    在依赖关系允许时，保留输入项的原有顺序。
+    使用迭代遍历，避免适配器输入触发 Python 递归深度限制。
     """
     records = list(items)
     by_id: dict[str, T] = {}
@@ -256,10 +253,10 @@ def validate_tool_plan(
     used_step_ids: set[str],
     max_steps: int,
 ) -> list[ToolStep]:
-    """Atomically validate a full plan without mutating IDs or dispatching tools.
+    """整体校验完整计划，不修改 ID，也不派发工具。
 
-    The controller maps an over-budget plan to step_budget before this helper;
-    callers can also use it independently and receive a ValueError.
+    控制器在调用本辅助函数前，将超预算计划映射为 step_budget；
+    独立调用本函数时，超预算会抛出 ValueError。
     """
     if len(plan.steps) > max_steps:
         raise ValueError("tool plan exceeds remaining step budget")

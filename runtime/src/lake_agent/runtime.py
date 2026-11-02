@@ -1,10 +1,8 @@
-"""Async coordination with bounded tool waves, run-local budgets and provenance.
+"""通过有界工具批次、单次运行预算和来源追踪进行异步协调。
 
-Adapters perform all parsing, retrieval and generation. This module authorizes their
-requests, validates their replies, and serially commits state transitions. Only
-explicitly safe data-tool waits overlap; model/content calls remain sequential.
-It never runs model
-generated code, reads evaluation labels, or interprets source locators.
+适配器负责全部解析、检索和生成。本模块授权请求、验证响应，并串行提交状态转移。
+仅明确支持安全并发的数据工具等待可以重叠，模型和内容调用保持串行。
+本模块不执行模型生成的代码、不读取评估标签，也不解释来源定位符。
 """
 
 from __future__ import annotations
@@ -45,7 +43,7 @@ def _utc() -> str:
 
 
 class _Controller(ToolExecutionMixin):
-    """One instance per run, including when callers share adapter instances."""
+    """每次运行独占一个控制器实例，即使调用方共享适配器实例也如此。"""
 
     def __init__(self, request, data, content, planner, trace, *, recovery=None):
         self.req, self.data, self.content, self.planner, self.trace = (
@@ -90,25 +88,24 @@ class _Controller(ToolExecutionMixin):
             self.recovery.attach(self)
 
     def _id(self, prefix):
-        """Use a per-run stable stream only when durable execution is enabled."""
+        """仅在启用持久化执行时使用单次运行内稳定的标识符序列。"""
         return self.recovery.identifier(prefix) if self.recovery is not None else _id(prefix)
 
     async def _invoke_port(self, phase, method, request, response_type):
-        """Keep persistence admission outside adapter-owned implementations."""
+        """在适配器实现之外完成持久化调用准入。"""
         if self.recovery is not None:
             return await self.recovery.invoke(phase, method, request, response_type)
         return await method(request)
 
     async def _invoke_tool_port(self, request):
-        """The isolated worker saves each known reply before sibling settlement."""
+        """由隔离工作任务在同批其他任务结算前保存每个已知响应。"""
         return await self._invoke_port("tool", self.data.invoke, request, m.ToolResult)
 
     async def _observe(self, request, response, artifact_ref):
-        """Index a valid tool reply after its full audit artifact is committed.
+        """在完整审计工件提交后，为有效工具响应建立索引。
 
-        Observations include failed attempts but never acquire evidence IDs.
-        Source authorization comes from the accepted plan, not tool prose.
-        Only this run's index is exposed to the local JSON page reader.
+        观察记录包含失败尝试，但不分配证据 ID。来源授权依据已接受的计划，不采信工具文本。
+        本地 JSON 分页读取器只可访问本次运行的索引。
         """
         step = self.accepted_steps[request.step_id]
         observation = dict(
@@ -136,15 +133,15 @@ class _Controller(ToolExecutionMixin):
         self.observations_by_id[observation["observation_id"]] = observation
 
     async def _read_observation(self, decision):
-        """Read only a known result; never interpret IDs as filesystem paths."""
+        """仅读取已知结果，绝不将 ID 解释为文件系统路径。"""
         self._time()
         if self.counts.observation_reads >= self.cfg.max_observation_reads:
             raise _Stop("budget_exceeded", "observation_read_budget")
         observation = self.observations_by_id.get(decision.observation_id)
         if observation is None:
             raise _Stop("failed", "invalid_observation_read")
-        # Reserve space for the stable observation ID in addition to the page
-        # envelope. The context builder keeps requested pages whole.
+        # 除页面封装外，还需为稳定的观察 ID 预留空间。
+        # 上下文构造器会完整保留请求的页面。
         overhead = len(canonical_json({"observation_id": decision.observation_id})) + 1
         history_overhead = (
             len(
@@ -190,7 +187,7 @@ class _Controller(ToolExecutionMixin):
         )
 
     async def _write(self, factory: Callable, *, terminal=False):
-        """Normal writes share run deadline; terminal settlement gets bounded grace."""
+        """普通写入共用运行截止时间，终态结算使用有界宽限时间。"""
         deadline = self.deadline
         if terminal:
             deadline = self.loop.time() + self.cfg.cancel_cleanup_timeout_ms / 1000
@@ -255,11 +252,10 @@ class _Controller(ToolExecutionMixin):
         idempotent=False,
         step_id=None,
     ):
-        """Persist intent before dispatch; only idempotent data operations retry.
+        """先持久化调用意图再派发，仅允许幂等数据操作重试。
 
-        A model slot is reserved before await. A valid reply explicitly reports
-        provider_requests=0/1; timeout or broken envelopes retain the reservation
-        because actual network dispatch is then unobservable to the controller.
+        在 await 前预留模型调用配额。有效响应须明确报告 provider_requests=0/1；
+        超时或响应封装损坏时保留配额，因为控制器无法确认是否实际发起了网络请求。
         """
         operation_id = self._id("op")
         for attempt in range(1, self.cfg.max_retries_per_data_operation + 2):
@@ -292,14 +288,14 @@ class _Controller(ToolExecutionMixin):
                     ),
                     token_budget=m.TokenBudget(),
                 )
-            # Pydantic preserves already-instantiated nested models. Detach
-            # every port request so planner/content adapters cannot mutate the
-            # controller's trusted capabilities, sources or original evidence.
+            # Pydantic 会保留已经实例化的嵌套模型。
+            # 每个端口请求都要与原对象分离，防止规划器或内容适配器修改
+            # 控制器信任的能力、来源或原始证据。
             req = request_type(**context, **fields).model_copy(deep=True)
             if self.recovery is not None:
                 req = await self.recovery.prepare_serial(phase, req)
-                # Rebinding the fresh ContentPort can consume time. New calls
-                # receive only the original run's remaining dispatch window.
+                # 重新绑定新的 ContentPort 可能耗时；新增调用只能使用
+                # 原运行剩余的派发时间窗口。
                 call_deadline = min(
                     self.deadline, self.loop.time() + self.cfg.per_call_timeout_ms / 1000
                 )
@@ -312,11 +308,10 @@ class _Controller(ToolExecutionMixin):
             meta = dict(
                 operation_id=operation_id, call_id=req.call_id, attempt=attempt, step_id=step_id
             )
-            # Reserve budgets before awaiting the start-event commit. If caller
-            # cancellation races a thread-backed append, the commit outcome is
-            # uncertain; retain physical/model reservations and expose the ID
-            # in run.cancelled. Normal write failures roll back because no port
-            # call can follow them.
+            # 等待开始事件提交前先预留预算。调用方取消若与线程中的
+            # 追加操作发生竞态，提交结果可能未知；此时保留实际调用和模型
+            # 配额，并在 run.cancelled 中暴露 ID。
+            # 普通写入失败则回退预留，因为之后不可能发起端口调用。
             if data_kind:
                 setattr(self.counts, data_kind, getattr(self.counts, data_kind) + 1)
                 if step_id and attempt == 1:
@@ -340,12 +335,12 @@ class _Controller(ToolExecutionMixin):
                 self.pending_call = None
                 raise
             self.pending_call = None
-            # A slow trace write can consume the dispatch window. The persisted
-            # call.started attempt remains budgeted, but must not reach the port.
+            # 缓慢的追踪写入可能耗尽派发窗口。已持久化的 call.started
+            # 尝试仍占用预算，但不得再进入端口。
             if self.loop.time() >= call_deadline:
                 if step_id and attempt == 1:
-                    # The logical invoke did not start even though its physical
-                    # attempt was reserved after call.started was committed.
+                    # call.started 已提交后虽预留了实际尝试，
+                    # 但逻辑调用尚未开始。
                     self.counts.steps -= 1
                 if self.loop.time() >= self.deadline:
                     await self._event(
@@ -386,9 +381,9 @@ class _Controller(ToolExecutionMixin):
                     setattr(self.counts, count_field, getattr(self.counts, count_field) + 1)
                 if data_kind and attempt > 1:
                     self.counts.retries += 1
-                # A committed start is distinct from a call currently awaiting
-                # its adapter or result persistence. Preserve the latter when
-                # caller cancellation makes its final outcome unknowable.
+                # 已提交开始事件，与当前正在等待适配器响应或持久化结果的调用不同。
+                # 调用方取消导致最终结果无法确定时，
+                # 须保留后者的身份。
                 self.active_call = {"phase": phase, **meta, "outcome": "unknown"}
                 owner = asyncio.current_task()
                 cancelled_before = owner.cancelling() if owner is not None else 0
@@ -396,16 +391,16 @@ class _Controller(ToolExecutionMixin):
                     async with asyncio.timeout_at(call_deadline):
                         raw = await self._invoke_port(phase, method, req, response_type)
                 finally:
-                    # timeout_at removes its own cancellation request on exit.
-                    # A new pending request belongs to the caller, including
-                    # when the adapter suppresses cancel then returns or raises.
+                    # timeout_at 退出时会移除自身的取消请求。
+                    # 新增的待处理请求属于调用方，包括适配器吞掉取消后
+                    # 返回响应或抛出异常的情况。
                     if owner is not None and owner.cancelling() > cancelled_before:
                         raise asyncio.CancelledError
-                # timeout_at is cooperative: an adapter may suppress its
-                # injected cancellation, but a late response cannot be accepted.
+                # timeout_at 依赖协作：适配器可能吞掉其注入的取消，
+                # 但迟到响应仍不得被接受。
                 if self.loop.time() >= call_deadline:
                     raise TimeoutError
-                # Revalidate even a model instance: model_copy(update=...) bypasses Pydantic.
+                # 即使已是模型实例也要重新验证：model_copy(update=...) 会绕过 Pydantic。
                 raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
                 if len(canonical_json(raw)) > self.cfg.max_output_bytes_per_call:
                     raise ValueError("response exceeds max_output_bytes")
@@ -416,15 +411,15 @@ class _Controller(ToolExecutionMixin):
                 if hasattr(response, "usage"):
                     if provider:
                         self.counts.model_calls += response.usage.provider_requests
-                        # A valid zero-request report proves that no provider
-                        # dispatch consumed this slot. Keep completed actual
-                        # calls reserved, but release unused reservations.
+                        # 有效的零请求报告证明此配额未用于提供方请求。
+                        # 已完成的实际调用继续占用预留，
+                        # 未使用的预留则释放。
                         self.model_calls_reserved -= 1 - response.usage.provider_requests
                         provider_usage_settled = True
                     self._add_usage(response.usage)
                     if not provider and response.usage.provider_requests != 0:
-                        # Preserve a declared actual dispatch in accounting even
-                        # while failing the local-port contract violation.
+                        # 即使因违反本地端口契约而失败，也要在用量核算中
+                        # 保留已声明的实际派发。
                         self.counts.model_calls += response.usage.provider_requests
                         raise ValueError("local method must not make provider requests")
                 ref = await self._artifact(response)
@@ -445,9 +440,9 @@ class _Controller(ToolExecutionMixin):
             except asyncio.CancelledError:
                 cancelled = True
                 if provider and not provider_usage_settled:
-                    # No valid usage report reached the controller. Charge the
-                    # reserved attempt once, matching timeout/error accounting;
-                    # a returned local response must remain a known zero.
+                    # 控制器未收到有效用量报告；对预留尝试计数一次，
+                    # 与超时和错误的核算方式一致。
+                    # 已返回的本地响应仍须保持为已知零用量。
                     self.counts.model_calls += 1
                     self._add_usage(m.Usage(provider_requests=1))
                 raise
@@ -508,7 +503,7 @@ class _Controller(ToolExecutionMixin):
                     detail={"error_type": type(exc).__name__},
                     **meta,
                 )
-                # Exceptions have no reliable retryable contract. Never blindly replay tools.
+                # 异常没有可靠的可重试契约，绝不盲目重放工具调用。
                 raise _Stop("failed", "tool_error" if data_kind else "module_error") from exc
             finally:
                 if not cancelled:
@@ -525,8 +520,8 @@ class _Controller(ToolExecutionMixin):
                     and error.code not in _FATAL_TOOL_CODES
                     and self.req.mode != "fixed_retrieval"
                 ):
-                    # Replanning is a new, budgeted decision. It is not a
-                    # transport retry and does not replay unknown side effects.
+                    # 重新规划是一次新的、受预算约束的决策。
+                    # 它不是传输重试，也不重放结果未知的副作用。
                     return response
                 if error.code == "timeout":
                     raise _Stop("timeout", "call_timeout")
@@ -538,7 +533,7 @@ class _Controller(ToolExecutionMixin):
                     else ("tool_error" if data_kind else "module_error")
                 )
                 raise _Stop("failed", reason)
-            # Capped full jitter. No task is spawned; cancellation interrupts sleep directly.
+            # 使用带上限的全抖动退避；不创建新任务，取消可直接打断休眠。
             delay = random.uniform(0, min(0.05 * 2 ** min(attempt - 1, 6), 1.0))
             await self._event(
                 "data.retry", detail={"delay_ms": delay * 1000, "error_code": error.code}, **meta
@@ -552,6 +547,7 @@ class _Controller(ToolExecutionMixin):
         raise AssertionError("retry loop did not settle")
 
     async def _catalog(self):
+        """分页加载并验证固定目录快照，再向内容端口注册目录。"""
         cursor, cursors = None, set()
         snapshot = self.cfg.dataset_snapshot
         while True:
@@ -599,6 +595,7 @@ class _Controller(ToolExecutionMixin):
         self.handle = reply.data.handle
 
     async def _search(self, subtask, focus=None):
+        """检索当前子任务的候选来源，并验证数量、归属和过滤范围。"""
         query = focus.query if focus else subtask.search_query
         subtask = subtask.model_copy(update={"search_query": query})
         source_filter = focus.source_ids if focus and focus.source_ids else None
@@ -629,12 +626,13 @@ class _Controller(ToolExecutionMixin):
         return sorted(candidates, key=lambda item: (-item.score, item.source_id))
 
     async def _execute_plan(self, plan, subtask, candidates):
+        """完整验证计划和来源授权后，再登记步骤并派发工具工作。"""
         if len(plan.steps) > self.cfg.max_plan_steps - self.counts.steps:
             raise _Stop("budget_exceeded", "step_budget")
         allowed = {c.source_id for c in candidates} | {e.source_id for e in self.evidence}
-        # Inspect may establish a useful schema without returning evidence.
-        # Search adapters can omit visited sources, so keep accepted observation
-        # sources authorized independently of the next search's candidate list.
+        # inspect 可以建立有用的结构信息，而不返回证据。
+        # 检索适配器可能省略已访问来源，因此已接受观察记录的来源授权
+        # 须独立于下一次检索的候选列表保留。
         allowed.update(source for item in self.observations for source in item["source_ids"])
         try:
             steps = validate_dag(plan.steps, "step_id")
@@ -651,7 +649,7 @@ class _Controller(ToolExecutionMixin):
                     raise ValueError("duplicate source IDs")
         except (ValueError, ValidationError) as exc:
             raise _Stop("failed", "invalid_plan") from exc
-        # Validate the entire plan before committing any ID or invoking any step.
+        # 提交任何 ID 或执行任何步骤前，先验证整个计划。
         self.step_ids.update(ids)
         self.accepted_steps.update({step.step_id: step for step in steps})
         ref = await self._artifact(plan)
@@ -659,6 +657,7 @@ class _Controller(ToolExecutionMixin):
         await self._dispatch_tool_plan(steps)
 
     async def _compose(self):
+        """基于已完成子任务和证据生成答案，并校验证据引用。"""
         reply = await self._call(
             "content.compose",
             self.content.compose,
@@ -676,12 +675,13 @@ class _Controller(ToolExecutionMixin):
         self.answer = reply.data
 
     async def _workflow(self):
-        """Delegate routing to a private graph while keeping I/O authority here."""
+        """将路由交给私有图，I/O 授权仍保留在控制器中。"""
         from .workflow import execute_workflow
 
         return await execute_workflow(self)
 
     async def _cancel_cleanup(self):
+        """在有限清理窗口内记录取消状态并释放追踪接收器。"""
         self._sync_tool_dispatches()
         if not self.trace_open:
             return
@@ -695,18 +695,18 @@ class _Controller(ToolExecutionMixin):
                         terminal=True,
                         detail={
                             "call_counts": self.counts.model_dump(),
-                            # A cancellation may interrupt the await that
-                            # commits ``call.started``. Keep the reservation
-                            # and expose the call identity so an auditor can
-                            # identify an unconfirmed start-event commit.
-                            # The adapter has not been dispatched in this path.
+                            # 取消可能打断提交 call.started 的 await。
+                            # 保留预留并暴露调用标识，
+                            # 便于审计方识别尚未确认提交的
+                            # 开始事件。
+                            # 此路径下尚未向适配器派发调用。
                             **self._call_snapshots(),
                         },
                     )
             except Exception:
                 pass
-        # Closing is independent of appending the terminal event so a failed
-        # cancellation record cannot prevent the sink from being released.
+        # 关闭与追加终态事件相互独立，防止取消记录写入失败
+        # 导致接收器无法释放。
         try:
             async with asyncio.timeout_at(cleanup_deadline):
                 await self.trace.close()
@@ -714,7 +714,7 @@ class _Controller(ToolExecutionMixin):
             pass
 
     async def _propagate_cancellation(self):
-        """Bound trace cleanup and observe it before returning cancellation."""
+        """限定追踪清理时长，并在返回取消前等待清理任务结束。"""
         cleanup = asyncio.create_task(self._cancel_cleanup())
         try:
             await asyncio.shield(cleanup)
@@ -726,12 +726,13 @@ class _Controller(ToolExecutionMixin):
                 pass
 
     async def execute(self):
+        """执行一次控制器运行，统一处理终态审计、关闭和调用方取消。"""
         trace_ref = None
         try:
             try:
-                # Cancellation during a thread-backed create may arrive after
-                # the directory is reserved. Mark cleanup eligible before await;
-                # an ordinary initialization failure clears it below.
+                # 在线程中创建目录时，取消可能发生于目录已预留之后。
+                # 在 await 前先标记为需要清理；
+                # 普通初始化失败会在下面清除此标记。
                 self.trace_open = True
                 async with asyncio.timeout_at(self.deadline):
                     if self.recovery is not None:
@@ -747,8 +748,8 @@ class _Controller(ToolExecutionMixin):
             reason = await self._workflow()
             status = "completed"
         except asyncio.CancelledError:
-            # Shield the short cleanup, preserve original cancellation even if a
-            # second cancel arrives, and never leave an unobserved cleanup task.
+            # 屏蔽短暂清理期间的取消；即使再次取消，也保留原始取消，
+            # 并确保清理任务的结果或异常得到获取。
             await self._propagate_cancellation()
             raise
         except _Stop as stop:
@@ -779,7 +780,7 @@ class _Controller(ToolExecutionMixin):
                 except Exception:
                     status, reason, trace_ref = "failed", "trace_close_failed", None
         except asyncio.CancelledError:
-            # Final event/close awaitables are also cancellable by the caller.
+            # 最终事件和关闭操作的 await 同样可以被调用方取消。
             await self._propagate_cancellation()
             raise
         return m.RunResult(
@@ -815,10 +816,10 @@ async def run(
     trace: TraceSink,
     state_store: StateStore | None = None,
 ) -> m.RunResult:
-    """Run once on the caller's loop; caller cancellation always propagates.
+    """在调用方事件循环中执行一次，始终向上传播调用方取消。
 
-    Use a fresh TraceSink for every run. Adapters may be shared only if reentrant.
-    Request dictionaries can be validated with RunRequest.model_validate first.
+    每次运行都须使用新的 TraceSink。只有可重入的适配器才可共享。
+    请求字典可先通过 RunRequest.model_validate 验证。
     """
     request = m.RunRequest.model_validate(request.model_dump(mode="json"))
     if state_store is not None:
@@ -844,11 +845,10 @@ async def resume(
     trace: TraceSink,
     state_store: StateStore,
 ) -> m.RunResult:
-    """Reconstruct a durable run from known replies with fresh port instances.
+    """使用新的端口实例，根据已知响应重建持久化运行。
 
-    The original deadline and budgets remain authoritative. Incompatible state
-    or any unresolved external outcome raises StateStoreError before dispatch.
-    The caller owns the store lifecycle; each execution needs a fresh trace sink.
+    原始截止时间和预算仍然有效。状态不兼容或存在未确定的外部结果时，
+    在派发前抛出 StateStoreError。调用方负责存储生命周期，每次执行须使用新的追踪接收器。
     """
     from .recovery import durable_run
 

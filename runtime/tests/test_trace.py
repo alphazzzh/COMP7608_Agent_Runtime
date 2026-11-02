@@ -1,4 +1,4 @@
-"""Exercise durable trace ordering, exclusive ownership, and cancellation handling."""
+"""验证持久化轨迹的顺序、独占所有权与取消处理。"""
 
 import asyncio
 import json
@@ -124,8 +124,8 @@ async def test_failed_event_commit_prevents_accidental_duplicate_append(tmp_path
     with pytest.raises(OSError, match="device failure"):
         await sink.append(event())
     monkeypatch.setattr("lake_agent.trace.os.fsync", original)
-    # Bytes may already be visible even though durable commit failed. Retrying
-    # must not produce a second event with the same sequence number.
+    # 即使持久化提交失败，字节也可能已经可见。重试时
+    # 不得产生具有相同序列号的第二个事件。
     with pytest.raises(RuntimeError, match="failed"):
         await sink.append(event())
     assert len((tmp_path / "run-1" / "events.jsonl").read_text().splitlines()) == 1
@@ -151,8 +151,8 @@ async def test_cancelled_create_propagates_promptly_and_leaves_closeable_sink(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.2)
     release.set()
-    # Disk work already running in a thread cannot be forcibly stopped. The
-    # storage lock guarantees that a later operation waits for its commit.
+    # 线程中已经开始的磁盘操作不能强制停止。
+    # 存储锁保证后续操作等待该次提交完成。
     await sink.append(event())
     assert await sink.close() == str(tmp_path / "run-1" / "events.jsonl")
 

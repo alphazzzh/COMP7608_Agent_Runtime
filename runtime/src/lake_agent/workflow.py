@@ -1,15 +1,12 @@
-"""Run-local LangGraph orchestration over the runtime's existing safety primitives.
+"""基于运行时现有安全机制，为单次运行组织 LangGraph 工作流。
 
-The graph owns only control flow: the bound controller still authorizes every
-adapter call, accounts for budgets, allocates semantic IDs, commits evidence and
-writes the audit journal. State contains transient routing/planning values and
-is deliberately neither checkpointed nor shared between invocations. Durable
-recovery continues to replay the controller's single known-response journal.
+图只负责控制流：绑定的控制器仍负责授权每次适配器调用、核算预算、分配语义 ID、
+提交证据并写入审计日志。状态仅包含临时路由和规划值，不创建检查点，也不在调用间共享。
+持久化恢复仍通过控制器唯一的已知响应日志重放历史。
 
-Each named node represents a real stage of the original workflow. In particular,
-observation reads return directly to planning, execution returns to retrieval,
-and feedback revisits an accepted subtask rather than constructing another plan.
-No graph diagnostic is added to the public trace or its stable identifier stream.
+每个命名节点对应原工作流的实际阶段。读取观察结果后直接返回规划，执行后返回检索，
+反馈则重新访问已接受的子任务，不另建子任务计划。
+图诊断信息不会进入公开追踪或其稳定的标识符序列。
 """
 
 from __future__ import annotations
@@ -34,23 +31,20 @@ if TYPE_CHECKING:
 
 
 class _NodeCancelled(Exception):
-    """Carry deliberate node cancellation through LangGraph's task scheduler.
+    """通过 LangGraph 任务调度器传递节点主动引发的取消。
 
-    A trace/adapter may raise CancelledError without cancelling the graph task
-    (the Web pause hook does this after saving evidence). LangGraph treats a
-    cancelled child as settled and may return an incomplete state instead of
-    propagating it. A private ordinary exception forces graph unwind; the owned
-    invocation restores CancelledError only after all graph children are gone.
+    追踪或适配器可能抛出 CancelledError，却没有取消图任务；Web 暂停钩子在保存证据后
+    就会这样做。LangGraph 将被取消的子任务视为已结束，可能返回不完整状态而不传播取消。
+    这里用私有普通异常强制退出图；所属调用待所有图子任务结束后才还原 CancelledError。
     """
 
 
 class WorkflowState(TypedDict, total=False):
-    """Transient values belonging to exactly one bound controller invocation.
+    """仅属于一次绑定控制器调用的临时状态。
 
-    Controller-owned evidence, usage, accepted plans and audit history are not
-    duplicated here. Nodes replace each routing field serially; no reducers or
-    parallel writes are needed. Read pages live only through a contiguous read
-    phase of the active subtask, matching the planner's bounded context contract.
+    控制器持有的证据、用量、已接受计划和审计历史不在此重复保存。节点串行替换路由字段，
+    无需归约器或并行写入。读取的页面只在当前子任务的连续读取阶段保留，符合规划器的
+    有界上下文约定。
     """
 
     next_node: str
@@ -69,13 +63,11 @@ class WorkflowState(TypedDict, total=False):
 
 
 def graph_step_limit(config: m.RunConfig) -> int:
-    """Bound transitions by finite control budgets, never provider requests.
+    """根据有限的控制预算约束转移次数，不以提供方请求数作为上限。
 
-    A normal cycle consumes a subtask, feedback round, tool step or observation
-    read. Eight transitions per unit conservatively cover routing, completion,
-    compose and verification; the constant covers initialization and the final
-    over-budget attempt. Local ModuleResult replies release model reservations,
-    so max_model_calls cannot bound the number of graph transitions.
+    正常循环会消耗一个子任务、反馈轮次、工具步骤或观察读取配额。每单位预留八次转移，
+    保守覆盖路由、完成、答案合成和验证；常数项覆盖初始化和最后一次超预算尝试。
+    本地 ModuleResult 响应会释放模型调用预留，因此 max_model_calls 不能约束图转移次数。
     """
     return 32 + 8 * (
         config.max_subtasks
@@ -87,17 +79,13 @@ def graph_step_limit(config: m.RunConfig) -> int:
 
 @contextmanager
 def _local_graph_context() -> Iterator[None]:
-    """Keep this graph independent of ambient LangSmith/Runnable tracing.
+    """隔离当前图与外层 LangSmith/Runnable 追踪环境。
 
-    In the supported Core version, callback configuration first checks the
-    tracing_v2 callback ContextVar, then LangSmith's enabled context/environment.
-    Clearing only the latter would still attach an outer LangChainTracer. Core
-    also injects collect_runs() through a separate run_collector ContextVar even
-    when tracing is disabled; clear that collector so private graph inputs and
-    outputs cannot enter the caller's collection. Clear inherited Runnable
-    configuration so outer callbacks/checkpoint options cannot enter this
-    invocation. Tokens restore the caller's exact values; process environment
-    and concurrent task contexts are never changed.
+    在支持的 Core 版本中，回调配置先检查 tracing_v2 回调 ContextVar，再检查 LangSmith
+    的启用上下文或环境；仅清除后者仍会附加外层 LangChainTracer。即使禁用追踪，Core
+    也会通过独立的 run_collector ContextVar 注入 collect_runs()，因此也需清除该收集器，
+    防止私有图输入输出进入调用方的收集结果。清除继承的 Runnable 配置，防止外层回调和
+    检查点选项进入本次调用。令牌用于精确恢复调用方原值，不修改进程环境或并发任务上下文。
     """
     tracer_token = tracing_v2_callback_var.set(None)
     collector_token = run_collector_var.set(None)
@@ -112,10 +100,11 @@ def _local_graph_context() -> Iterator[None]:
 
 
 def build_workflow(controller: _Controller):
-    """Compile a fresh, controller-bound graph without retries/cache/checkpoints."""
+    """编译一个新建且绑定控制器的图，不启用重试、缓存或检查点。"""
     c = controller
 
     async def initialize(state: WorkflowState):
+        """验证工具契约并初始化本次图调用的临时路由状态。"""
         if c.cfg.max_input_tokens is not None or c.cfg.max_output_tokens is not None:
             raise _Stop("failed", "unsupported_token_budget")
         try:
@@ -133,10 +122,12 @@ def build_workflow(controller: _Controller):
         }
 
     async def catalog(state: WorkflowState):
+        """注册来源目录，并按运行模式选择固定检索或任务分解。"""
         await c._catalog()
         return {"next_node": "fixed_search" if c.req.mode == "fixed_retrieval" else "decompose"}
 
     async def decompose(state: WorkflowState):
+        """请求并验证子任务 DAG，提交已接受计划的审计记录。"""
         reply = await c._call(
             "planner.decompose",
             c.planner.decompose,
@@ -161,6 +152,7 @@ def build_workflow(controller: _Controller):
         return {}
 
     async def next_subtask(state: WorkflowState):
+        """按已接受顺序推进子任务，并阻塞依赖失败任务的后继。"""
         cursor = state["subtask_cursor"]
         if cursor >= len(c.subtasks):
             if not c.evidence:
@@ -186,10 +178,12 @@ def build_workflow(controller: _Controller):
         }
 
     async def search(state: WorkflowState):
+        """围绕当前子任务和可选验证焦点检索候选来源。"""
         candidates = await c._search(state["active_subtask"], state["feedback_focus"])
         return {"candidates": candidates}
 
     async def select_tools(state: WorkflowState):
+        """构造有界上下文，并将规划决策路由到读取、完成或执行节点。"""
         c._time()
         subtask = state["active_subtask"]
         context = build_planner_context(
@@ -232,11 +226,12 @@ def build_workflow(controller: _Controller):
         return {"decision": decision, "next_node": destination}
 
     async def read_observation(state: WorkflowState):
+        """读取已知观察结果，并在上下文预算内保留连续读取的完整页面。"""
         page = await c._read_observation(state["decision"])
         pages = state["read_pages"]
         result = dict(page, previous_pages=[], omitted_pages=len(pages))
-        # Preserve recent whole pages up to half the planner-context byte cap.
-        # This exactly retains the original contiguous-read history semantics.
+        # 在规划器上下文字节上限的一半内保留最近的完整页面。
+        # 这样精确保留原有连续读取历史的语义。
         for previous in reversed(pages):
             result["previous_pages"].insert(0, previous)
             result["omitted_pages"] -= 1
@@ -244,16 +239,18 @@ def build_workflow(controller: _Controller):
                 result["previous_pages"].pop(0)
                 result["omitted_pages"] += 1
                 break
-        # State is private and graph nodes commit serially. Append in place to
-        # avoid copying the complete page history for every bounded page read.
+        # 状态私有且图节点串行提交；原地追加，避免每次有界分页读取
+        # 都复制完整页面历史。
         pages.append(page)
         return {"read_result": result, "read_pages": pages}
 
     async def execute_plan(state: WorkflowState):
+        """通过控制器验证并执行计划，随后清空连续读取上下文。"""
         await c._execute_plan(state["decision"], state["active_subtask"], state["candidates"])
         return {"read_result": None, "read_pages": []}
 
     async def finish_subtask(state: WorkflowState):
+        """提交子任务终态，并更新普通推进或反馈重访的完成状态。"""
         subtask = state["active_subtask"]
         reason = state["decision"].reason
         await c._event(
@@ -268,8 +265,8 @@ def build_workflow(controller: _Controller):
             detail={"subtask_id": subtask.subtask_id, "reason": reason},
         )
         if state["in_feedback"]:
-            # Revisiting a task replaces its completion state. Rebuild in the
-            # accepted DAG order, preserving the original no-duplicate behavior.
+            # 重新访问任务会替换其完成状态。按已接受 DAG 的顺序重建，
+            # 保留原有的不重复行为。
             completed = {item.subtask_id for item in c.completed_subtasks}
             if reason == "evidence_complete":
                 completed.add(subtask.subtask_id)
@@ -281,7 +278,7 @@ def build_workflow(controller: _Controller):
         if reason == "evidence_complete":
             c.completed_subtasks.append(subtask)
         else:
-            # Skipped prerequisites block descendants just like failed ones.
+            # 跳过的前置任务与失败任务一样，会阻塞后继任务。
             failed = failed | {subtask.subtask_id}
         return {
             "failed_subtask_ids": failed,
@@ -290,6 +287,7 @@ def build_workflow(controller: _Controller):
         }
 
     async def compose(state: WorkflowState):
+        """合成答案，并根据运行模式结束或进入验证。"""
         await c._compose()
         if c.req.mode == "fixed_retrieval":
             return {"terminal_reason": "fixed_retrieval_completed", "next_node": END}
@@ -298,6 +296,7 @@ def build_workflow(controller: _Controller):
         return {"next_node": "verify"}
 
     async def verify(state: WorkflowState):
+        """验证答案与证据引用，并确定结束或反馈路径。"""
         reply = await c._call(
             "content.verify",
             c.content.verify,
@@ -332,6 +331,7 @@ def build_workflow(controller: _Controller):
         }
 
     async def feedback(state: WorkflowState):
+        """消耗一轮反馈配额，重新合成或重访已接受的目标子任务。"""
         if state["feedback_round"] >= c.cfg.max_feedback_rounds:
             raise _Stop("insufficient_evidence", "feedback_exhausted")
         round_number = state["feedback_round"] + 1
@@ -356,6 +356,7 @@ def build_workflow(controller: _Controller):
         }
 
     async def fixed_search(state: WorkflowState):
+        """为固定检索模式获取候选来源，并检查提取工具是否可用。"""
         subtask = m.Subtask(
             subtask_id="fixed", objective=c.req.question, search_query=c.req.question
         )
@@ -367,6 +368,7 @@ def build_workflow(controller: _Controller):
         return {"active_subtask": subtask, "candidates": candidates}
 
     async def fixed_execute(state: WorkflowState):
+        """为固定候选构造提取步骤，通过控制器执行并要求产生证据。"""
         steps = [
             m.ToolStep(
                 step_id=c._id("step"),
@@ -388,8 +390,8 @@ def build_workflow(controller: _Controller):
         c.completed_subtasks = [state["active_subtask"]]
         return {}
 
-    # Explicit edges make the actual execution stages inspectable. Routing
-    # callbacks read only per-run state and never authorize or dispatch work.
+    # 显式边便于检查实际执行阶段。路由回调只读取本次运行状态，
+    # 绝不授权或派发工作。
     graph = StateGraph(WorkflowState)
     nodes = {
         "initialize": initialize,
@@ -409,6 +411,8 @@ def build_workflow(controller: _Controller):
     }
 
     def cancellation_bridge(node):
+        """将节点取消转换为可强制图调度器退出的私有异常。"""
+
         async def guarded(state: WorkflowState):
             try:
                 return await node(state)
@@ -445,13 +449,12 @@ def build_workflow(controller: _Controller):
 
 
 async def execute_workflow(controller: _Controller) -> str:
-    """Run and fully settle the private graph before controller cleanup begins.
+    """运行私有图，并在控制器开始清理前等待图内所有任务结束。
 
-    LangGraph's AsyncBackgroundExecutor.__aexit__ cancels its node tasks and
-    awaits asyncio.wait(tasks). A second cancellation of that exit would abort
-    the wait and leave a live node writing to an already-closed trace or released
-    recovery lease. Own one task, shield the caller's await, forward cancellation
-    exactly once, and shield-drain through any subsequent caller cancellations.
+    LangGraph 的 AsyncBackgroundExecutor.__aexit__ 会取消节点任务，再等待
+    asyncio.wait(tasks)。若退出过程再次被取消，等待会中止，存活节点可能继续写入
+    已关闭的追踪或使用已释放的恢复租约。这里持有一个任务，屏蔽调用方等待时的取消，
+    只向图转发一次取消，并在调用方后续取消期间持续屏蔽取消、等待图任务结束。
     """
 
     async def invoke():
@@ -479,12 +482,12 @@ async def execute_workflow(controller: _Controller) -> str:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
-                # Further cancellation belongs to the outer caller only. Do not
-                # forward it into graph exit/node settlement a second time.
+                # 后续取消仅属于外层调用方，不再向图退出和节点收尾过程
+                # 重复转发取消。
                 continue
             except Exception:
                 break
-        # Observe a raced failure, but preserve the caller's cancellation.
+        # 获取竞态中发生的失败，但保留调用方取消。
         if not task.cancelled():
             task.exception()
         raise

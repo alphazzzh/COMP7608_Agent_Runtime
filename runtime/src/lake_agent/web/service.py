@@ -1,8 +1,8 @@
-"""Own web jobs and presentation state, delegating every execution to the core.
+"""管理网页任务与展示状态，将全部执行工作委托给核心运行时。
 
-One service owns one local directory. Jobs use fresh adapters and audit sinks,
-share only the caller-managed SQLite store, and are drained before shutdown.
-The manager does not execute tools, alter core budgets or resolve unknown calls.
+一个服务管理一个本地目录。每个任务使用新的适配器与审计接收端，
+只共享由调用方管理的 SQLite 存储；关闭前会等待所有任务收尾。
+任务管理器不执行工具、不修改核心预算，也不裁定结果未知的调用。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ _LOG = logging.getLogger(__name__)
 
 
 def summary(record):
-    """Public index fields; internal recovery flags stay out of history cards."""
+    """返回公开索引字段；历史卡片不包含内部恢复标志。"""
     names = (
         "run_id",
         "scenario",
@@ -39,8 +39,8 @@ def summary(record):
     )
     value = {name: record.get(name) for name in names}
     if value["result"] is not None:
-        # Detach the public result before replacing the private absolute path;
-        # callers must not mutate the manifest owned by an executing job.
+        # 替换私有绝对路径前，先复制公开结果；
+        # 调用方不得修改正在执行的任务所持有的清单。
         attempts = record.get("attempts", [])
         value["result"] = {
             **value["result"],
@@ -54,7 +54,7 @@ def summary(record):
 
 
 class PresentationTrace(JsonlTraceSink):
-    """Record the exact core attempt identity and optionally stop after evidence."""
+    """记录核心实际采用的尝试身份，并可选择在获得证据后停止。"""
 
     def __init__(self, root, on_attempt, *, pause=False):
         super().__init__(root)
@@ -69,15 +69,15 @@ class PresentationTrace(JsonlTraceSink):
     async def append(self, event):
         await super().append(event)
         if self.pause and not self.paused and event.event_type == "evidence.added":
-            # The core worker committed its validated reply before this event.
-            # Cancellation propagates through the public run boundary, which
-            # closes its trace and releases its lease before our job settles.
+            # 此事件发生前，核心工作任务已提交经校验的响应。
+            # 取消信号经公开运行接口传播；该接口会先关闭轨迹并释放租约，
+            # 随后本服务的任务才结束。
             self.paused = True
             raise asyncio.CancelledError
 
 
 class DemoService:
-    """Bound active jobs and serialize admission without a queued work backlog."""
+    """限制活动任务数量，并串行处理准入，不建立待执行任务积压队列。"""
 
     def __init__(self, data_dir, max_active_runs=2, *, profiles=None):
         if type(max_active_runs) is not int or max_active_runs < 1:
@@ -94,8 +94,8 @@ class DemoService:
     async def start(self):
         await self.repository.start()
         await self.evaluations.start()
-        # A departed process cannot leave an active asyncio job. This is only
-        # presentation reconciliation; no core run is resumed automatically.
+        # 已退出的进程不可能留下活动的 asyncio 任务。此处只核对并修正
+        # 展示状态，不自动恢复任何核心运行。
         for record in await self.repository.listing(limit=None):
             if record["status"] in {"running", "queued"}:
                 record.update(status="interrupted", updated_at=utc_now())
@@ -130,12 +130,12 @@ class DemoService:
         task.add_done_callback(observed)
 
     async def _schedule(self, record, *, recovering):
-        """An abandoned HTTP admission must settle its persisted UI record."""
+        """HTTP 准入请求被取消时，也必须妥善更新已持久化的界面记录。"""
         try:
             await self.repository.save(record)
         except asyncio.CancelledError:
-            # save drains its worker before propagating. No job was spawned,
-            # so retain the interrupted presentation without claiming activity.
+            # save 会先等待其工作线程结束，再传播取消。此时尚未创建任务，
+            # 因此保留中断的展示记录，不将其标记为活动状态。
             record.update(status="interrupted", updated_at=utc_now())
             await self.repository.save(record)
             raise
@@ -213,8 +213,8 @@ class DemoService:
             sink.pause = profile.pause_after_evidence and not recovering
             record.update(status="running", updated_at=utc_now())
             await self.repository.save(record)
-            # The context owns all per-attempt adapter resources. Neither a
-            # browser request nor the shared job manager closes sibling ports.
+            # 上下文持有本次尝试的全部适配器资源。浏览器请求和共享任务管理器
+            # 均不负责关闭其他端口。
             async with profile.ports_factory() as bound:
                 ports = dict(
                     data=bound.data,
@@ -234,10 +234,10 @@ class DemoService:
                         config=profile.run_config.model_copy(deep=True),
                     )
                     result = await run(request, **ports)
-                # The journal decides whether a returned result is terminal:
-                # audit failures can return a RunResult while deliberately
-                # leaving the durable run open for safe reconstruction. Do not
-                # turn those attempts into permanent web terminal outcomes.
+                # 返回结果是否为终态，由持久化日志决定：审计失败时可能返回
+                # RunResult，同时有意将持久化运行保留为未结束状态，
+                # 以便安全重建。不能将这些尝试
+                # 转换为永久的网页终态结果。
                 lease = await self.state_store.acquire(run_id)
                 try:
                     saved = await self.state_store.load(lease)
@@ -255,8 +255,8 @@ class DemoService:
                     )
                 else:
                     record.update(status=terminal["status"])
-                # Save before adapter teardown. A cleanup failure must preserve
-                # both a terminal answer and a nonterminal recovery projection.
+                # 在拆除适配器前保存。即使清理失败，也必须同时保留
+                # 终态答案和非终态的恢复视图。
                 core_settled = True
                 await self.repository.save(record)
         except asyncio.CancelledError:
@@ -310,8 +310,8 @@ class DemoService:
         view = await self.repository.view(run_id)
         active = self.active(run_id)
         if not active and view["status"] in {"queued", "running"}:
-            # Disk projection yields the loop. The job may settle after its
-            # manifest was read, so refresh before publishing inactive status.
+            # 读取磁盘视图会让出事件循环。清单读取后，任务可能已经结束，
+            # 因此发布非活动状态前须刷新记录。
             view = await self.repository.view(run_id)
             active = self.active(run_id)
         can_resume = (
@@ -352,8 +352,8 @@ class DemoService:
             return summary(await self.repository.load(run_id))
 
     async def _settle_unstarted(self, run_id):
-        # A task cancelled before its coroutine's first instruction cannot run
-        # its own finally. Reconcile it after observing task completion.
+        # 任务若在协程首条指令执行前被取消，就无法执行自身的 finally。
+        # 等确认任务结束后，再核对并修正记录。
         record = await self.repository.load(run_id)
         if record["status"] in {"queued", "running"}:
             record.update(
@@ -362,8 +362,8 @@ class DemoService:
             await self.repository.save(record)
 
     async def close(self):
-        # Admission, cancellation and the shutdown snapshot share one boundary.
-        # Drain outside the lock: job settlement does not need admission rights.
+        # 任务准入、取消和关闭快照共用同一个同步边界。
+        # 在锁外等待任务收尾，因为任务结束不需要准入权限。
         async with self.lock:
             self.closing = True
             jobs = list(self.tasks.items())

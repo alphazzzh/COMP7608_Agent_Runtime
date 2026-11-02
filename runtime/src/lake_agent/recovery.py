@@ -1,15 +1,12 @@
-"""Rebuild a single controller from a durable, validated adapter-call journal.
+"""根据经过验证的持久化适配器调用日志重建单个控制器。
 
-This optional coordinator borrows the durable-intent and attempt separation
-patterns documented in dsh-superagent-review-2026-11-01.md. It does not execute
-reference code or depend on DeepSeek Harness. Rebuilding consumes known replies
-through the existing controller so its authorization, evidence and budget rules
-stay authoritative. Unknown outcomes never become permission to call an adapter.
+此可选协调器借鉴 dsh-superagent-review-2026-11-01.md 中记录的持久化意图及执行尝试
+分离模式，不执行参考代码，也不依赖 DeepSeek Harness。重建通过现有控制器消费已知
+响应，继续以控制器的授权、证据和预算规则为准。结果未知绝不构成调用适配器的授权。
 
-Recovery is deliberately strict: identical runtime implementation and trusted
-tool contracts, a finite original deadline including downtime, and one local
-owner. Each execution writes a separate audit segment. This is not arbitrary
-coroutine restoration, cross-version migration or exactly-once external I/O.
+恢复条件刻意从严：运行时实现和可信工具契约必须一致，原始有限截止时间须包含停机
+时长，并且只能有一个本地所有者。每次执行写入独立审计分段。这不支持任意协程恢复、
+跨版本迁移，也不保证外部 I/O 恰好执行一次。
 """
 
 from __future__ import annotations
@@ -44,7 +41,7 @@ _RECOVERABLE_STOPS = {
 
 
 class _RunState(m.Model):
-    """Validate metadata independently of SQLite's JSON/hash guarantees."""
+    """独立验证元数据，不仅依赖 SQLite 的 JSON 和哈希保证。"""
 
     journal_version: int
     runtime_version: m.NonEmpty
@@ -61,7 +58,7 @@ class _RunState(m.Model):
 
 
 class _CallRecord(m.Model):
-    """A closed envelope; per-phase request/reply validation follows below."""
+    """封闭的记录封装；后续按调用阶段验证请求和响应。"""
 
     status: Literal["started", "completed"]
     phase: m.NonEmpty
@@ -71,7 +68,7 @@ class _CallRecord(m.Model):
 
 
 def _request_type(phase):
-    """Only the runtime's fixed ports can be represented by a durable intent."""
+    """持久化意图仅可表示运行时预定义的固定端口。"""
     return {
         "catalog": m.CatalogRequest,
         "content.prepare_catalog": m.CatalogRegistrationRequest,
@@ -85,12 +82,12 @@ def _request_type(phase):
 
 
 def _implementation_digest() -> str:
-    """Reject source or graph scheduler changes under the same package version."""
+    """即使包版本相同，也拒绝源码或图调度器发生变化的状态。"""
     digest = hashlib.sha256()
-    # A frozen lockfile makes installs reproducible; metadata also guards an
-    # application that changes its environment without updating this package.
-    # These packages supply the graph runner, task/context handling, channels
-    # and the tracing context that isolates private workflow inputs.
+    # 冻结的锁文件保证安装可复现；元数据也防范应用在未更新
+    # 此包时修改运行环境。
+    # 这些包提供图执行器、任务与上下文处理、通道，
+    # 以及用于隔离私有工作流输入的追踪上下文。
     for package in ("langgraph", "langchain-core", "langgraph-checkpoint", "langsmith"):
         digest.update(package.encode())
         digest.update(b"\0")
@@ -104,7 +101,7 @@ def _implementation_digest() -> str:
 
 
 def _tool_digest(data) -> str:
-    """Hash validated, detached local capabilities; no adapter I/O is allowed."""
+    """对经过验证并与原对象分离的本地能力求哈希，不允许适配器 I/O。"""
     try:
         specs = validate_tool_specs(data.tool_specs())
         value = [specs[name].model_dump(mode="json") for name in sorted(specs)]
@@ -114,7 +111,7 @@ def _tool_digest(data) -> str:
 
 
 def _response_type(phase):
-    """Closed response registry prevents loading arbitrary persisted types."""
+    """使用封闭响应注册表，防止加载任意持久化类型。"""
     return {
         "catalog": m.CatalogResult,
         "content.prepare_catalog": m.ModuleResult[m.CatalogHandle],
@@ -130,7 +127,7 @@ def _response_type(phase):
 
 
 class RecoverySession:
-    """Own durable admission and cached replies, never tool scheduling policy."""
+    """负责持久化准入和响应缓存，不负责工具调度策略。"""
 
     def __init__(self, store: StateStore, lease: StateLease, state, calls, *, resuming):
         self.store, self.lease = store, lease
@@ -145,14 +142,14 @@ class RecoverySession:
         self.unseen = set(self.cached)
         self.rebind_call = None
         self.handles = set()
-        # Auxiliary registration is a real local invocation on each recovery,
-        # distinct from replaying the original logical prepare_catalog call.
+        # 辅助注册是每次恢复时真实发生的本地调用，
+        # 与重放原始逻辑 prepare_catalog 调用分别计算。
         self.extra_content_calls = sum(bool(v.get("auxiliary")) for v in calls.values())
         self.attempt_id = f"attempt-{uuid4().hex}"
         self._inspect_journal()
 
     def _inspect_journal(self):
-        """Validate the complete journal before permitting any adapter access."""
+        """在允许任何适配器访问之前验证完整日志。"""
         for key, entry in self.calls.items():
             try:
                 envelope = _CallRecord.model_validate(entry)
@@ -199,7 +196,7 @@ class RecoverySession:
                 raise StateStoreError("recovery_state_invalid") from exc
 
     def attach(self, controller):
-        """Reconstruction gets a bounded local window; new I/O uses original UTC."""
+        """重建使用有界本地时间窗口，新增 I/O 仍以原始 UTC 截止时间为准。"""
         self.controller = controller
         elapsed = max(0, time.time() - self.state["started_epoch"])
         controller.start = controller.loop.time() - elapsed
@@ -213,7 +210,7 @@ class RecoverySession:
             self._set_original_deadline()
 
     def identifier(self, prefix):
-        """One sequence includes artifacts, observations and evidence identities."""
+        """工件、观察记录和证据标识共用一个序列。"""
         self.counter += 1
         value = f"{self.state['seed']}:{self.counter}:{prefix}".encode()
         return f"{prefix}-{hashlib.sha256(value).hexdigest()[:32]}"
@@ -223,14 +220,14 @@ class RecoverySession:
         self.controller.deadline = self.controller.loop.time() + max(0, remaining)
 
     def annotate(self, kind, fields):
-        """A reconstructed call is explicitly historical in the new audit segment."""
+        """在新审计分段中明确标记重建调用属于历史。"""
         if fields.get("call_id") in self.cached:
             fields["detail"] = {**fields.get("detail", {}), "replayed": True}
         return fields
 
     def _normalized(self, request):
         value = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
-        # JSON roundtrip creates a detached copy before normalizing nested fields.
+        # 先通过 JSON 往返转换生成独立副本，再规范化嵌套字段。
         value = json.loads(canonical_json(value))
         value.pop("timeout_ms", None)
         if "budget_remaining" in value:
@@ -238,8 +235,8 @@ class RecoverySession:
         if "catalog_handle" in value:
             if value["catalog_handle"] not in self.handles:
                 raise StateStoreError("recovery_catalog_mismatch")
-            # Only handles returned by a validated registration of this exact
-            # stored snapshot enter the alias set. Arbitrary values never match.
+            # 只有对这个确切的已存储快照进行有效注册后返回的句柄
+            # 才能进入别名集合；任意其他值都不能匹配。
             value["catalog_handle"] = {
                 "registered_catalog": self.rebind_call["request"]["catalog_digest"]
             }
@@ -256,7 +253,7 @@ class RecoverySession:
         return True
 
     async def _guard_match(self, phase, request):
-        """Do not let a mismatch become an ordinary adapter/retry error."""
+        """防止历史不匹配被误归为普通适配器错误或重试错误。"""
         try:
             return self._matches(phase, request)
         except StateStoreError as exc:
@@ -264,7 +261,7 @@ class RecoverySession:
             raise RunStopped("failed", "state_store_failed") from exc
 
     async def _stored(self, method, *args):
-        """A failed persistence boundary freezes all subsequent dispatch."""
+        """持久化边界失败后冻结所有后续派发。"""
         try:
             return await method(*args)
         except StateStoreError as exc:
@@ -272,7 +269,7 @@ class RecoverySession:
             raise RunStopped("failed", "state_store_failed") from exc
 
     async def progress(self):
-        """Persist inspectable progress; replies remain the reconstruction source."""
+        """持久化可检查的进度，重建仍以响应为依据。"""
         if self.failure:
             raise RunStopped("failed", "state_store_failed")
         c = self.controller
@@ -289,7 +286,7 @@ class RecoverySession:
         await self._stored(self.store.save, self.lease, self.state)
 
     async def _activate(self, permitted=()):
-        """Cross from history to new work only after every earlier call matches."""
+        """仅在此前每个调用均匹配后，从历史重放切换到新增工作。"""
         if self.failure:
             raise RunStopped("failed", "state_store_failed")
         if self.unseen - set(permitted):
@@ -303,7 +300,7 @@ class RecoverySession:
             await self._register_catalog()
 
     async def _register_catalog(self):
-        """Rebuild only the local ContentPort index, charging a separate call."""
+        """仅重建本地 ContentPort 索引，并单独计入一次调用。"""
         c = self.controller
         old = self.rebind_call["request"]
         if c.snapshot != old["catalog_snapshot_id"]:
@@ -322,8 +319,8 @@ class RecoverySession:
                 ),
             }
         )
-        # Independent IDs keep auxiliary work from changing the historical
-        # controller stream. It still produces ordinary paired audit records.
+        # 独立 ID 防止辅助工作改变控制器的历史序列。
+        # 辅助工作仍会产生普通的成对审计记录。
         ref = f"rebind-artifact-{uuid4().hex}"
         await c._write(lambda: c.trace.put_artifact(ref, request.model_dump(mode="json")))
         c.counts.content += 1
@@ -341,8 +338,8 @@ class RecoverySession:
             m.ModuleResult[m.CatalogHandle],
             auxiliary=True,
         )
-        # Rebinding remains a local-port contract, but a violation cannot erase
-        # a declared real provider dispatch or turn unknown usage into zero.
+        # 重新绑定仍须遵守本地端口契约，但契约违规不能抹去
+        # 已声明的真实提供方派发，也不能将未知用量改为零。
         c._add_usage(reply.usage)
         c.counts.model_calls += reply.usage.provider_requests
         c.model_calls_reserved += reply.usage.provider_requests
@@ -371,7 +368,7 @@ class RecoverySession:
         c.handle = reply.data.handle
 
     async def prepare_serial(self, phase, request):
-        """Check a cached request or activate before its new intent is committed."""
+        """在提交新增意图前检查缓存请求，或切换到新增工作。"""
         if await self._guard_match(phase, request):
             return request
         await self._stored(self._activate)
@@ -379,26 +376,25 @@ class RecoverySession:
         if isinstance(request, m.SearchRequest):
             updates["catalog_handle"] = self.controller.handle
         if hasattr(request, "budget_remaining"):
-            # Fields were assembled before optional catalog re-registration.
-            # Refresh only wall time: other budgets are reserved by the caller.
+            # 字段在可选的目录重新注册前已经组装完毕。
+            # 只刷新墙钟时间；其他预算由调用方预留。
             updates["budget_remaining"] = request.budget_remaining.model_copy(
                 update={"wall_time_ms": self.controller._remaining().wall_time_ms}
             )
         return request.model_copy(update=updates)
 
     async def prepare_wave(self):
-        """Rebind a new frontier before constructing its tool call windows.
+        """在构造新一批工具调用的时间窗口前，重新绑定其执行前沿。
 
-        Durable admission records every intent before starting any worker, so a
-        resumable historical wave is wholly cached. A partly admitted wave has
-        unknown intents and was refused during preflight. With no unseen calls,
-        activation here cannot skip history or disturb deterministic IDs.
+        持久化准入会在启动任何工作任务前记录全部意图，因此可恢复的历史批次必定全部有缓存。
+        部分准入的批次存在结果未知的意图，已在预检中被拒绝。此处没有尚未重放的调用，
+        因此切换到新增工作不会跳过历史，也不会扰乱确定性 ID。
         """
         if self.rebuilding and not self.unseen:
             await self._stored(self._activate)
 
     async def admit_wave(self, attempts):
-        """Persist every new wave intent before starting any of its workers."""
+        """在启动批次内任何工作任务之前，持久化全部新增调用意图。"""
         known, new = set(), []
         for attempt in attempts:
             request = attempt.request
@@ -431,8 +427,8 @@ class RecoverySession:
         self.controller._time()
         if request.call_id not in self.prepared:
             await self._begin(phase, request, auxiliary=auxiliary)
-        # Storage is awaited; the original deadline may expire while committing
-        # intent. timeout_at(past_deadline) alone can still enter coroutine code.
+        # 存储需要 await；提交意图时可能超过原始截止时间。
+        # 仅使用 timeout_at(past_deadline) 仍可能进入协程代码。
         self.controller._time()
         deadline = min(
             self.controller.deadline, self.controller.loop.time() + request.timeout_ms / 1000
@@ -455,8 +451,8 @@ class RecoverySession:
                 "status": "completed",
                 "response": response.model_dump(mode="json"),
             }
-            # Each worker commits its own validated reply immediately. A slow sibling
-            # or subsequent trace failure must not erase a known external outcome.
+            # 每个工作任务都立即提交自己经过验证的响应。其他同批任务缓慢
+            # 或后续追踪失败，都不应抹去已知外部结果。
             await self._stored(self.store.finish_call, self.lease, request.call_id, value)
             self.calls[request.call_id] = value
             if phase == "content.prepare_catalog" and response.status == "ok":
@@ -465,8 +461,8 @@ class RecoverySession:
                     self.rebind_call = value
             return response
         finally:
-            # Preserve caller intent through malformed returns and storage
-            # errors too. A valid response is committed before reaching here.
+            # 对无效返回和存储错误也须保留调用方的取消意图。
+            # 有效响应在执行到这里前已经提交。
             if owner is not None and owner.cancelling() > cancelled_before:
                 raise asyncio.CancelledError
 
@@ -481,9 +477,9 @@ class RecoverySession:
 
 
 async def durable_run(request, *, data, content, planner, trace, state_store, run_id=None):
-    """Own one lease through reconstruction, final persistence and cancellation."""
-    # Local imports keep the existing runtime usable without loading the
-    # optional POSIX storage backend and avoid a runtime/recovery import cycle.
+    """在重建、最终持久化和取消处理全过程持有同一个租约。"""
+    # 局部导入使现有运行时无需加载可选 POSIX 存储后端，
+    # 同时避免 runtime/recovery 循环导入。
     from .runtime import _Controller
 
     if not callable(getattr(trace, "create_attempt", None)):
@@ -565,18 +561,18 @@ async def durable_run(request, *, data, content, planner, trace, state_store, ru
             raise StateStoreError(session.failure)
         if session.unseen:
             raise StateStoreError("recovery_request_mismatch")
-        # Audit failures are recoverable only through the separate journal.
-        # Normal business stops (including a provider 403) are durable terminal
-        # outcomes, not invitations to repeatedly spend another model budget.
+        # 审计失败只能通过独立调用日志恢复。
+        # 正常业务停止（包括提供方 403）是已持久化的终态结果，
+        # 不能成为反复消耗新模型预算的理由。
         if result.stop_reason not in _RECOVERABLE_STOPS:
             state["result"] = result.model_dump(mode="json")
         await state_store.save(lease, state)
         return result
     finally:
-        # Cleanup must run on every path, but storage failure during teardown
-        # must not replace an already propagating caller cancellation or the
-        # primary recovery error. The SQLite backend drains its disk worker and
-        # closes the OS lock even when updating the persisted lease token fails.
+        # 所有路径都必须清理，但清理期间的存储失败不能覆盖
+        # 已经在传播的调用方取消或主要恢复错误。
+        # 即使持久化租约令牌更新失败，SQLite 后端也会等待
+        # 磁盘工作线程结束并关闭操作系统锁。
         primary = sys.exception()
         try:
             await state_store.release(lease)
