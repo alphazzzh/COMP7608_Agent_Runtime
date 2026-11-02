@@ -20,7 +20,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from . import models as m
-from .context import build_planner_context, read_json_page
+from .context import read_json_page
 from .errors import FATAL_TOOL_CODES as _FATAL_TOOL_CODES
 from .errors import RunStopped as _Stop
 from .ports import ContentPort, DataPort, PlannerPort, TraceSink
@@ -30,7 +30,6 @@ from .validation import (
     catalog_digest,
     source_ids_for,
     validate_dag,
-    validate_tool_specs,
 )
 
 if TYPE_CHECKING:
@@ -659,81 +658,6 @@ class _Controller(ToolExecutionMixin):
         await self._event("plan.accepted", data_ref=ref)
         await self._dispatch_tool_plan(steps)
 
-    async def _subtask(self, subtask, focus=None):
-        await self._event(
-            "subtask.state", status="running", detail={"subtask_id": subtask.subtask_id}
-        )
-        read_result = None
-        read_pages = []
-        candidates = await self._search(subtask, focus)
-        while True:
-            self._time()
-            context = build_planner_context(
-                self.observations,
-                self.evidence,
-                subtask_id=subtask.subtask_id,
-                max_bytes=self.cfg.max_planner_context_bytes,
-                preview_bytes=self.cfg.planner_preview_bytes,
-                read_result=read_result,
-            )
-            context["context_status"]["remaining_observation_reads"] = max(
-                0, self.cfg.max_observation_reads - self.counts.observation_reads
-            )
-            # The four-field byte cap includes metadata. Keep the optional
-            # remaining-read count out if it would overflow the exact budget.
-            if len(canonical_json(context)) > self.cfg.max_planner_context_bytes:
-                del context["context_status"]["remaining_observation_reads"]
-            result = await self._call(
-                "planner.select_tools",
-                self.planner.select_tools,
-                m.ToolPlanningRequest,
-                dict(
-                    question=self.req.question,
-                    subtask=subtask,
-                    candidates=candidates,
-                    **context,
-                    verifier_focus=focus,
-                    tool_specs=list(self.specs.values()),
-                    budget_remaining=self._remaining(),
-                ),
-                m.ModuleResult[m.ToolPlan | m.FinishDecision | m.ReadObservationDecision],
-                provider=True,
-            )
-            decision = result.data
-            if isinstance(decision, m.ReadObservationDecision):
-                page = await self._read_observation(decision)
-                # Planner API requests are stateless. Preserve recent pages so
-                # a later page does not erase the earlier information needed
-                # to form a decision. Only this subtask's contiguous read phase
-                # is retained, capped to half the whole working context.
-                read_result = dict(page, previous_pages=[], omitted_pages=len(read_pages))
-                for previous in reversed(read_pages):
-                    read_result["previous_pages"].insert(0, previous)
-                    read_result["omitted_pages"] -= 1
-                    if len(canonical_json(read_result)) > self.cfg.max_planner_context_bytes // 2:
-                        read_result["previous_pages"].pop(0)
-                        read_result["omitted_pages"] += 1
-                        break
-                read_pages.append(page)
-                continue
-            if isinstance(decision, m.FinishDecision):
-                await self._event(
-                    "subtask.state",
-                    status=(
-                        "succeeded"
-                        if decision.reason == "evidence_complete"
-                        else "skipped"
-                        if decision.reason == "not_applicable"
-                        else "failed"
-                    ),
-                    detail={"subtask_id": subtask.subtask_id, "reason": decision.reason},
-                )
-                return decision.reason
-            await self._execute_plan(decision, subtask, candidates)
-            read_result = None
-            read_pages = []
-            candidates = await self._search(subtask, focus)
-
     async def _compose(self):
         reply = await self._call(
             "content.compose",
@@ -752,145 +676,10 @@ class _Controller(ToolExecutionMixin):
         self.answer = reply.data
 
     async def _workflow(self):
-        if self.cfg.max_input_tokens is not None or self.cfg.max_output_tokens is not None:
-            raise _Stop("failed", "unsupported_token_budget")
-        try:
-            self.specs = validate_tool_specs(self.data.tool_specs())
-        except Exception as exc:
-            raise _Stop("failed", "invalid_tool_contract") from exc
-        await self._catalog()
-        if self.req.mode == "fixed_retrieval":
-            subtask = m.Subtask(
-                subtask_id="fixed", objective=self.req.question, search_query=self.req.question
-            )
-            candidates = await self._search(subtask)
-            if not candidates:
-                raise _Stop("insufficient_evidence", "no_candidates")
-            if "extract" not in self.specs:
-                raise _Stop("failed", "invalid_tool_contract")
-            steps = [
-                m.ToolStep(
-                    step_id=self._id("step"),
-                    subtask_id="fixed",
-                    tool_name="extract",
-                    source_ids=[c.source_id],
-                    args={
-                        "source_id": c.source_id,
-                        "query": self.req.question,
-                        "max_chars": self.cfg.fixed_extract_max_chars,
-                    },
-                    purpose="Read fixed top-k evidence",
-                )
-                for c in candidates
-            ]
-            await self._execute_plan(m.ToolPlan(steps=steps), subtask, candidates)
-            if not self.evidence:
-                raise _Stop("insufficient_evidence", "no_evidence")
-            self.completed_subtasks = [subtask]
-            await self._compose()
-            return "fixed_retrieval_completed"
-        reply = await self._call(
-            "planner.decompose",
-            self.planner.decompose,
-            m.PlannerRequest,
-            dict(
-                question=self.req.question,
-                catalog_snapshot_id=self.snapshot,
-                tool_specs=list(self.specs.values()),
-                budget_remaining=self._remaining(),
-            ),
-            m.ModuleResult[m.TaskPlan],
-            provider=True,
-        )
-        try:
-            if len(reply.data.subtasks) > self.cfg.max_subtasks:
-                raise ValueError("too many subtasks")
-            self.subtasks = validate_dag(reply.data.subtasks, "subtask_id")
-        except ValueError as exc:
-            raise _Stop("failed", "invalid_plan") from exc
-        ref = await self._artifact(reply.data)
-        await self._event("task_plan.accepted", data_ref=ref)
-        failed = set()
-        for subtask in self.subtasks:
-            if set(subtask.depends_on) & failed:
-                failed.add(subtask.subtask_id)
-                await self._event(
-                    "subtask.state", status="blocked", detail={"subtask_id": subtask.subtask_id}
-                )
-                continue
-            reason = await self._subtask(subtask)
-            if reason == "insufficient_evidence":
-                failed.add(subtask.subtask_id)
-            elif reason == "evidence_complete":
-                self.completed_subtasks.append(subtask)
-            else:
-                # A skipped/non-applicable prerequisite is not a successful
-                # dependency; descendants need its evidence before execution.
-                failed.add(subtask.subtask_id)
-        if not self.evidence:
-            raise _Stop("insufficient_evidence", "planner_finished_no_evidence")
-        await self._compose()
-        if self.req.mode == "no_verifier":
-            return "planner_finished"
-        rounds = 0
-        while True:
-            reply = await self._call(
-                "content.verify",
-                self.content.verify,
-                m.VerifyRequest,
-                dict(question=self.req.question, answer=self.answer, evidence=self.evidence),
-                m.ModuleResult[m.Verification],
-                provider=True,
-            )
-            verification = reply.data
-            if any(
-                not set(issue.evidence_ids) <= {e.evidence_id for e in self.evidence}
-                for issue in verification.issues
-            ):
-                raise _Stop("failed", "invalid_module_response")
-            recommendation = verification.recommendation
-            focus = recommendation.focus
-            if focus and not set(focus.source_ids) <= self.sources.keys():
-                raise _Stop("failed", "invalid_module_response")
-            ref = await self._artifact(verification)
-            await self._event("verification", data_ref=ref, status=verification.verdict)
-            if verification.verdict == "supported":
-                return "verified_supported"
-            if recommendation.action in ("stop", "none"):
-                raise _Stop(
-                    "insufficient_evidence",
-                    "verifier_stop" if recommendation.action == "stop" else "no_further_action",
-                )
-            if rounds >= self.cfg.max_feedback_rounds:
-                raise _Stop("insufficient_evidence", "feedback_exhausted")
-            rounds += 1
-            await self._event(
-                "feedback.accepted", detail={"round": rounds, "action": recommendation.action}
-            )
-            if recommendation.action != "compose_again":
-                # Feedback is an additional pass over the existing task, not an
-                # unbudgeted new TaskPlan or a replay of a failed physical call.
-                if focus is None:
-                    raise _Stop("failed", "invalid_module_response")
-                target = next(
-                    (item for item in self.subtasks if item.subtask_id == focus.subtask_id),
-                    None,
-                )
-                if target is None:
-                    raise _Stop("failed", "invalid_module_response")
-                reason = await self._subtask(target, focus)
-                # A feedback pass replaces the target's previous completion
-                # state. Rebuild from the accepted DAG to keep topological
-                # order and avoid duplicates when successful work is revisited.
-                completed_ids = {item.subtask_id for item in self.completed_subtasks}
-                if reason == "evidence_complete":
-                    completed_ids.add(target.subtask_id)
-                else:
-                    completed_ids.discard(target.subtask_id)
-                self.completed_subtasks = [
-                    item for item in self.subtasks if item.subtask_id in completed_ids
-                ]
-            await self._compose()  # Every revised answer is verified on the next iteration.
+        """Delegate routing to a private graph while keeping I/O authority here."""
+        from .workflow import execute_workflow
+
+        return await execute_workflow(self)
 
     async def _cancel_cleanup(self):
         self._sync_tool_dispatches()

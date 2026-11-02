@@ -62,6 +62,7 @@ def wheel_identity(root, wheel, expected_version):
         assert metadata["Name"] == "lake-agent-runtime"
         assert metadata["Version"] == expected_version
         requirements = metadata.get_all("Requires-Dist", [])
+        assert any(item.startswith("langgraph<") for item in requirements), requirements
         for dependency in ("fastapi", "uvicorn"):
             selected = [item for item in requirements if item.lower().startswith(dependency)]
             assert selected, f"Missing optional web dependency: {dependency}"
@@ -101,9 +102,17 @@ def wheel_identity(root, wheel, expected_version):
 
 def probe_installed(expected_version):
     """Exercise the installed package in a separate, isolated interpreter."""
+    import asyncio
+    from importlib import metadata
+
     import httpx
 
     import lake_agent
+    from lake_agent.demo import DemoContent, DemoData, DemoPlanner
+    from lake_agent.models import RunRequest
+    from lake_agent.runtime import _Controller
+    from lake_agent.trace import JsonlTraceSink
+    from lake_agent.workflow import build_workflow
 
     work = Path.cwd().resolve()
     package = Path(lake_agent.__file__).resolve()
@@ -191,7 +200,44 @@ def probe_installed(expected_version):
             "evidence_ids": [item["evidence_id"] for item in view["evidence"]],
         }
 
-    checks = {}
+    # Inspect the installed engine as well as exercising it through HTTP below.
+    # Building a graph performs no adapter I/O and opens no audit directory.
+    async def inspect_graph():
+        graph = build_workflow(
+            _Controller(
+                RunRequest(task_id="installed-graph", question="Inspect offline workflow"),
+                DemoData(),
+                DemoContent(),
+                DemoPlanner(),
+                JsonlTraceSink(work / "graph-inspection"),
+            )
+        )
+        nodes = sorted(graph.get_graph().nodes)
+        assert {
+            "catalog",
+            "decompose",
+            "search",
+            "select_tools",
+            "read_observation",
+            "execute_plan",
+            "finish_subtask",
+            "compose",
+            "verify",
+            "feedback",
+            "fixed_search",
+            "fixed_execute",
+        } <= set(nodes), nodes
+        assert graph.checkpointer is None and graph.cache is None
+        return {
+            "engine": "langgraph",
+            "langgraph_version": metadata.version("langgraph"),
+            "langchain_core_version": metadata.version("langchain-core"),
+            "nodes": nodes,
+            "graph_checkpointer": False,
+            "graph_cache": False,
+        }
+
+    checks = {"workflow": asyncio.run(inspect_graph())}
     with server() as client:
         info = client.get("/api/info").json()
         assert info["version"] == expected_version and info["demo_only"] is True

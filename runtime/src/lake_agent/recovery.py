@@ -21,6 +21,7 @@ import math
 import sys
 import time
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -84,8 +85,17 @@ def _request_type(phase):
 
 
 def _implementation_digest() -> str:
-    """Reject source changes even when a developer forgot to bump the version."""
+    """Reject source or graph scheduler changes under the same package version."""
     digest = hashlib.sha256()
+    # A frozen lockfile makes installs reproducible; metadata also guards an
+    # application that changes its environment without updating this package.
+    # These packages supply the graph runner, task/context handling, channels
+    # and the tracing context that isolates private workflow inputs.
+    for package in ("langgraph", "langchain-core", "langgraph-checkpoint", "langsmith"):
+        digest.update(package.encode())
+        digest.update(b"\0")
+        digest.update(metadata.version(package).encode())
+        digest.update(b"\0")
     for path in sorted(Path(__file__).parent.glob("*.py")):
         digest.update(path.name.encode())
         digest.update(b"\0")
