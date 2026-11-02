@@ -1,0 +1,45 @@
+# Local environments, generated runtime state and build output.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+runtime/build/
+runs/
+
+# Keep only the reviewed screenshots referenced by the acceptance record.
+/runtime/output/*
+!/runtime/output/web/
+/runtime/output/web/*
+!/runtime/output/web/project-workspace-desktop.jpg
+!/runtime/output/web/project-workspace-mobile.jpg
+
+# OS/editor metadata and local credentials; examples may be committed.
+.DS_Store
+._*
+__MACOSX/
+.idea/
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+
+# LaTeX intermediates; retain the PDF and editable proposal sources.
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc

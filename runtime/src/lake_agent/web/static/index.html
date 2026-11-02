@@ -1,0 +1,106 @@
+<!doctype html>
+<!-- Project data-pool workspace. Same-origin APIs own profiles, tasks and reports. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f7f8f4">
+    <title>Agent Lab · 数据池工作台</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主内容</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="工作区导航">
+        <a class="brand" href="#workbench" aria-label="Agent Lab 智能问答">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="m16 3 12 7v13l-12 7-12-7V10Z" stroke="currentColor" stroke-width="1.7"/><path d="m4 10 12 7 12-7M16 17v13M10 6.5l12 7v6.5" stroke="currentColor" stroke-width="1.7"/></svg></span>
+          <span>Agent Lab<small>DATA POOL WORKSPACE</small></span>
+        </a>
+        <div class="workspace-label">项目工作区 <span class="small-dot" aria-hidden="true"></span></div>
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item is-active" data-view="workbench" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>智能问答<span class="nav-shortcut">01</span></button>
+          <button class="nav-item" data-view="sources"><span class="nav-icon" aria-hidden="true">▤</span>数据来源<span class="nav-shortcut">02</span></button>
+          <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true">◷</span>任务历史<span id="nav-history-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="evaluations"><span class="nav-icon" aria-hidden="true">▥</span>实验评估<span class="nav-shortcut">04</span></button>
+        </nav>
+        <div class="sidebar-section-heading"><span>最近任务</span><button id="refresh-sidebar" class="icon-button" aria-label="刷新任务历史" title="刷新任务历史">↻</button></div>
+        <div id="recent-runs" class="recent-runs"><p class="sidebar-empty">正在读取历史…</p></div>
+        <div class="sidebar-bottom">
+          <div class="environment-card"><span class="environment-icon" aria-hidden="true">◇</span><div><strong id="environment-title">项目数据池</strong><p id="environment-description">正在读取执行配置</p></div></div>
+          <div class="sidebar-meta"><span id="app-version">Agent Harness</span><span id="connection-label"><span class="connection-dot"></span>连接中</span></div>
+        </div>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar"><div class="breadcrumb">WORKSPACE <span>/</span> <strong id="breadcrumb-title">智能问答</strong></div><div class="topbar-tag"><span class="small-dot" aria-hidden="true"></span> LOCAL WORKSPACE</div></header>
+        <main id="main-content" tabindex="-1">
+          <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="关闭提示">×</button></div>
+
+          <section id="view-workbench" class="page-view" aria-labelledby="workbench-title">
+            <div class="page-heading"><div><p class="eyebrow">ASK · EXPLORE · VERIFY</p><h1 id="workbench-title">让数据回答你的问题<span class="heading-dot">.</span></h1><p class="page-description">选择数据池与执行配置，用自然语言提问，查看答案和可追溯的证据。</p></div><span id="workspace-kind" class="demo-badge">执行配置加载中</span></div>
+
+            <section class="setup-panel" aria-labelledby="question-heading">
+              <div class="section-heading"><div class="number-label">01</div><h2 id="question-heading">提出问题</h2><span class="section-caption">选择配置后开始探索</span></div>
+              <form id="run-form" class="run-form">
+                <div class="profile-field"><div class="field-label-row"><label for="profile">执行配置</label><button type="button" id="refresh-profiles" class="text-button">刷新配置 ↻</button></div><select id="profile" name="profile_id" disabled aria-describedby="profile-description profile-readiness"><option value="">正在读取配置…</option></select></div>
+                <div id="profile-summary" class="profile-summary"><p class="loading-copy">正在读取数据池与模块状态…</p></div>
+                <p id="profile-description" class="profile-description"></p>
+                <div id="profile-readiness" class="profile-readiness" role="status"></div>
+                <div class="question-field"><div class="field-label-row"><label for="question">你想了解什么？</label><button type="button" id="reset-question" class="text-button" disabled>使用建议问题 <span aria-hidden="true">↗</span></button></div><textarea id="question" name="question" rows="3" maxlength="2000" placeholder="输入一个关于所选数据池的问题…" required disabled></textarea><div class="input-footer"><span id="question-hint">任务由所选配置的数据、规划与内容模块执行。</span><span id="question-count">0 / 2000</span></div></div>
+                <div id="suggested-questions" class="suggested-questions" aria-label="建议问题"></div>
+                <div class="run-form-footer"><div class="mode-field"><label for="mode">执行模式</label><select id="mode" name="mode"><option value="full_agent">完整 Agent · 规划 + 核验</option><option value="no_verifier">对照模式 · 关闭核验</option><option value="fixed_retrieval">对照模式 · 固定检索</option></select></div><button id="start-run" class="button button-primary" type="submit" disabled><span aria-hidden="true">↗</span> 开始提问</button></div>
+              </form>
+            </section>
+
+            <section class="execution-section" aria-labelledby="execution-heading">
+              <div class="execution-heading"><div class="section-heading"><div class="number-label">02</div><h2 id="execution-heading">答案与证据</h2><span id="run-status" class="status-badge status-idle">等待提问</span></div><div id="run-actions" class="run-actions" hidden><button id="cancel-run" class="button button-small button-outline" hidden>停止运行</button><button id="resume-run" class="button button-small button-primary" hidden><span aria-hidden="true">↻</span> 恢复执行</button><a id="download-json" class="button button-small button-quiet" href="#" download>JSON <span aria-hidden="true">↓</span></a><a id="download-report" class="button button-small button-outline" href="#" download>任务报告 <span aria-hidden="true">↓</span></a></div></div>
+              <div id="selected-run-info" class="selected-run-info" hidden><h3 id="selected-run-question"></h3><span id="selected-run-label"></span><span id="selected-run-id" class="mono"></span></div>
+              <div id="run-state-note" class="run-state-note" hidden></div>
+              <section class="output-panel panel" aria-label="任务产出">
+                <div class="result-tabs" role="tablist" aria-label="任务产出"><button id="tab-answer" class="result-tab is-active" role="tab" aria-selected="true" aria-controls="panel-answer" data-tab="answer" tabindex="0">答案</button><button id="tab-evidence" class="result-tab" role="tab" aria-selected="false" aria-controls="panel-evidence" data-tab="evidence" tabindex="-1">证据 <span id="evidence-tab-count">0</span></button><span class="output-caption">内容来自本次任务记录</span></div>
+                <div id="panel-answer" class="tab-panel" role="tabpanel" aria-labelledby="tab-answer" tabindex="0"><div class="empty-state"><div class="empty-illustration answer-illustration" aria-hidden="true">✧</div><h3>从一个好问题开始</h3><p>选择已就绪的执行配置，答案与引用证据将在这里显示。</p></div></div>
+                <div id="panel-evidence" class="tab-panel" role="tabpanel" aria-labelledby="tab-evidence" tabindex="0" hidden></div>
+              </section>
+              <details id="audit-details" class="audit-details">
+                <summary><span>执行过程与原始记录</span><span id="event-count" class="muted-caption">0 个事件</span><span class="summary-chevron" aria-hidden="true">⌄</span></summary>
+                <div class="audit-body">
+                  <div class="metrics-grid" aria-label="从执行记录读取的运行指标"><div class="metric"><span>工具调用</span><strong id="metric-tools">—</strong><small>TOOLS</small></div><div class="metric"><span>执行步骤</span><strong id="metric-steps">—</strong><small>STEPS</small></div><div class="metric"><span>证据条目</span><strong id="metric-evidence">—</strong><small>EVIDENCE</small></div><div class="metric"><span>模型请求</span><strong id="metric-model_calls">—</strong><small>MODEL CALLS</small></div><div class="metric"><span>累计耗时</span><strong id="metric-duration_ms">—</strong><small id="metric-attempts">尚未开始</small></div></div>
+                  <p class="audit-caption">这些是本任务的执行指标；答案质量指标请查看单独导入的实验评估。</p>
+                  <div class="audit-grid">
+                    <section class="timeline-panel panel" aria-labelledby="timeline-heading"><div class="panel-heading"><h3 id="timeline-heading"><span class="timeline-heading-icon" aria-hidden="true">⌁</span>执行时间线</h3></div><div id="timeline" class="timeline"><div class="empty-state"><div class="empty-illustration" aria-hidden="true">⌁</div><h3>每一步，都有迹可循</h3><p>提问后显示规划、工具调用与证据记录。</p></div></div><div class="panel-footnote">选择事件，查看同一次执行尝试的请求与响应</div></section>
+                    <section class="inspector-panel panel" aria-label="原始调用记录"><div class="panel-heading"><h3>原始记录</h3><span class="muted-caption">审计数据</span></div><div id="panel-details" class="inspector-content"></div></section>
+                  </div>
+                </div>
+              </details>
+            </section>
+            <details class="runtime-capabilities"><summary>运行服务能力</summary><div id="capabilities" class="capability-grid"><p class="loading-copy">正在读取服务状态…</p></div></details>
+          </section>
+
+          <section id="view-sources" class="page-view" aria-labelledby="sources-title" hidden>
+            <div class="page-heading"><div><p class="eyebrow">KNOW YOUR DATA</p><h1 id="sources-title">每一份证据，都有来源<span class="heading-dot">.</span></h1><p class="page-description">浏览执行配置公开注册的数据来源，了解数据格式、摘要与版本。</p></div><button id="refresh-sources" class="button button-outline"><span aria-hidden="true">↻</span> 刷新目录</button></div>
+            <div class="catalog-notice"><span aria-hidden="true">ⓘ</span><p>这里展示已注册的目录元数据，可能只覆盖数据池的一部分。目录摘要不是原文；实际读取片段与定位信息保存在任务证据中。</p></div>
+            <div class="sources-toolbar"><label class="profile-filter" for="sources-profile"><span>执行配置</span><select id="sources-profile" disabled><option value="">正在读取配置…</option></select></label><label class="search-field"><span aria-hidden="true">⌕</span><input id="sources-search" type="search" placeholder="搜索名称、格式或来源 ID" aria-label="搜索数据来源"></label><span id="sources-count" class="muted-caption">0 个来源</span></div>
+            <div id="source-profile-note" class="source-profile-note"></div>
+            <div class="sources-layout"><div id="sources-list" class="sources-list" aria-label="数据来源目录"></div><section id="source-detail" class="source-detail panel" aria-label="数据来源详情"></section></div>
+          </section>
+
+          <section id="view-history" class="page-view" aria-labelledby="history-title" hidden>
+            <div class="page-heading"><div><p class="eyebrow">PERSISTENT TASK HISTORY</p><h1 id="history-title">每次探索，都有记录<span class="heading-dot">.</span></h1><p class="page-description">回看答案、证据和执行尝试，继续处理可安全恢复的任务。</p></div><button id="refresh-history" class="button button-outline"><span aria-hidden="true">↻</span> 刷新历史</button></div>
+            <div class="history-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="搜索问题、配置或任务 ID" aria-label="搜索任务历史"></label><label class="filter-field"><span>状态</span><select id="history-filter" aria-label="按任务状态筛选"><option value="all">全部状态</option><option value="active">运行中</option><option value="completed">已完成</option><option value="insufficient_evidence">证据不足</option><option value="budget_exceeded">预算停止</option><option value="timeout">超时</option><option value="paused">已暂停</option><option value="interrupted">已中断</option><option value="failed">执行错误 / 恢复受阻</option></select></label><span id="history-count" class="muted-caption">0 次任务</span></div><div id="history-list" class="history-list"></div>
+          </section>
+
+          <section id="view-evaluations" class="page-view" aria-labelledby="evaluations-title" hidden>
+            <div class="page-heading"><div><p class="eyebrow">MEASURE WITH EVIDENCE</p><h1 id="evaluations-title">让实验结果，可以比较<span class="heading-dot">.</span></h1><p class="page-description">导入实际评估汇总，比较完整 Agent、关闭核验和固定检索的结果。</p></div><button id="refresh-evaluations" class="button button-outline"><span aria-hidden="true">↻</span> 刷新报告</button></div>
+            <section class="evaluation-import panel" aria-labelledby="import-heading"><div><h2 id="import-heading">导入评估结果</h2><p>JSON 文件，最大 128 KiB。模板中的未知指标为 null，填入实际结果后再导入。</p></div><div class="import-actions"><a class="button button-outline" href="/api/evaluations/template" download="evaluation-template.json">下载模板 <span aria-hidden="true">↓</span></a><button id="choose-evaluation-file" class="button button-primary">导入 JSON <span aria-hidden="true">↑</span></button><input id="evaluation-file" type="file" accept=".json,application/json" class="visually-hidden" tabindex="-1" aria-label="选择评估 JSON 文件"></div><p id="evaluation-import-status" class="import-status" role="status" hidden></p></section>
+            <div class="evaluation-toolbar"><label for="evaluation-select"><span>评估报告</span><select id="evaluation-select" disabled><option value="">暂无报告</option></select></label><a id="export-evaluation" class="button button-outline" href="#" download hidden>导出 JSON <span aria-hidden="true">↓</span></a></div>
+            <div id="evaluation-content"></div>
+          </section>
+        </main>
+        <footer class="app-footer"><span>Agent Lab <span aria-hidden="true">/</span> 从数据出发，以证据作答</span><span>COMP7608 · PROJECT WORKSPACE</span></footer>
+      </div>
+    </div>
+    <div id="live-status" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

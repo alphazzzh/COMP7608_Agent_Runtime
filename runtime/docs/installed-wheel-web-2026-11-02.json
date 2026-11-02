@@ -1,0 +1,165 @@
+{
+  "verified_at": "2026-11-02T11:49:30.619436+00:00",
+  "verification": "installed optional web wheel; loopback HTTP; synthetic ports; zero model requests",
+  "runtime_version": "0.6.1",
+  "status": "passed",
+  "wheel": {
+    "filename": "lake_agent_runtime-0.6.1-py3-none-any.whl",
+    "sha256": "69f69fa4608e6fb2292d8eae8b70885dfd1586d6fe1592bca018ffb9521e86be",
+    "version": "0.6.1",
+    "requires_python": ">=3.11",
+    "requires_dist": [
+      "httpx<1,>=0.28",
+      "jsonschema<5,>=4.23",
+      "pydantic<3,>=2.11",
+      "pytest-asyncio<2,>=1; extra == 'dev'",
+      "pytest<10,>=8.3; extra == 'dev'",
+      "ruff>=0.12; extra == 'dev'",
+      "fastapi<1,>=0.115; extra == 'web'",
+      "uvicorn<1,>=0.30; extra == 'web'"
+    ],
+    "console_scripts": {
+      "lake-agent-demo": "lake_agent.demo:main",
+      "lake-agent-web": "lake_agent.web.app:main"
+    },
+    "static_files": [
+      "lake_agent/web/static/app.js",
+      "lake_agent/web/static/index.html",
+      "lake_agent/web/static/styles.css"
+    ],
+    "packaged_source_and_static_sha256": {
+      "lake_agent/__init__.py": "3bd9274bfdca0aef4f68a3ffc9ee581a3e1aaa2b41775719a1ddcebd65444018",
+      "lake_agent/context.py": "4f8a9e2d50f67eae96ccab4a54a88ef5d3d81b44b76788cc420093178c423baf",
+      "lake_agent/demo.py": "3ce1e908fdec5d3d2c7b8bb1412366805c9aae3b03c9a915d5c3b7f445dad594",
+      "lake_agent/errors.py": "937ab18ae3ab50a064e78435a616790f71be547cadad8d57730440379abed420",
+      "lake_agent/execution.py": "861999e67f774fec13dc467e04dda366a4e98f3c3f9deb3504b9a81b9a0e41d7",
+      "lake_agent/models.py": "c324ec4b7c48e38f1ddcd64ef2a8df653fb3b4109ffa6095aaf4b66d97b4162f",
+      "lake_agent/planner.py": "25d1af17fa87d99530d76eb0ef28275d865d08d5448ad99408fa6a704dd03e22",
+      "lake_agent/ports.py": "ae9e3d20bc2e3bf0fbc1cdcf979258930957a69c95c3dfd8466c3890d31b65fe",
+      "lake_agent/recovery.py": "9d9ad98b3a8b1baeb37e7522fe31fcc0867210320a5d67c2c138d07bf6c21668",
+      "lake_agent/runtime.py": "f00e1de8590f876d27ba893bbb8ad1a81cf777df2a771d36587f2b41d6083a03",
+      "lake_agent/state.py": "804e16a4f01e2cebfcd8e8b43be0b643f7c231f5eed23cf5f25f1e2af8ec27ae",
+      "lake_agent/tool_runtime.py": "9a566af91c50ed6f402d79427bc249561988c6dbcb756cfb0c61920e91e3be4c",
+      "lake_agent/trace.py": "48296f0430fb922273a6cf31c277746bfb6fac6c6c9fae0ec6d9f906625aa229",
+      "lake_agent/validation.py": "74a7a664358a5eb7b1ee2f61b2928e0cf022fe25feb056edade96e9b76f4b578",
+      "lake_agent/web/__init__.py": "f4506c2786b1959883023646443cebbf9234751cc718d326951e9e22ef4a9aff",
+      "lake_agent/web/app.py": "f1183c170a86fbd11bb653850f8b13b5cc522a7ee10e2ef4f7f9fed4a780c40f",
+      "lake_agent/web/evaluations.py": "7c00cb563ec54f3bc6c937d5771334b925ebd8566cf07dba6f5499aca8c1e98e",
+      "lake_agent/web/fixtures.py": "03a2ccb9a46b3341e8e7926bb5f896ea94fa677b4f513a65eaaa9c8788dd224b",
+      "lake_agent/web/profiles.py": "c772435e0b8cea1819e5b8543c764413e7cec7eb748c425b6e28fbe0eaeaea94",
+      "lake_agent/web/reports.py": "07f9cec2453d74dbc24fee3d15f3d920fd9e708ffc1c9671c2b9460d6a1c9fa7",
+      "lake_agent/web/service.py": "59172943ce7b8058b2017b078e9fad0cb0a3ce7f1d3bb7cc7e6fc617d5f26f82",
+      "lake_agent/web/static/app.js": "290955d1f3f73f5bfd685e04545a5487441676413837b1de79ee1e84c5f6229f",
+      "lake_agent/web/static/index.html": "8606758c4cec03a63434f7f06f151e0402cbe3b9f51b289995e0e30415f33d42",
+      "lake_agent/web/static/styles.css": "eb6f6cf550f573a8751b6ed2b19950be1359db164df2eba9928db8fbfdfba750",
+      "lake_agent/web/storage.py": "230c818a0761bf6c01a9def2ad1956d681c9ee9f73994983c0a545bace044f35"
+    },
+    "packaged_files_match_checkout": true
+  },
+  "isolated_install": {
+    "package_path": "/private/var/folders/5n/j5th8yxd3rx769rrfrfy_0tr0000gn/T/comp7608-installed-web-8xfriu1x/env/lib/python3.12/site-packages/lake_agent/__init__.py",
+    "python": "/private/var/folders/5n/j5th8yxd3rx769rrfrfy_0tr0000gn/T/comp7608-installed-web-8xfriu1x/env/bin/python",
+    "isolated_python": true,
+    "cli_exit_codes": [
+      -15,
+      -15
+    ],
+    "checks": {
+      "profiles": {
+        "registered": 4,
+        "project_unavailable": true
+      },
+      "evaluations": {
+        "import_preserves_unknown_metrics": true,
+        "download_attachment": true,
+        "persists_after_restart": true
+      },
+      "info": {
+        "version": "0.6.1",
+        "demo_only": true
+      },
+      "static": {
+        "/": {
+          "bytes": 15668,
+          "content_type": "text/html; charset=utf-8"
+        },
+        "/static/app.js": {
+          "bytes": 68385,
+          "content_type": "text/javascript; charset=utf-8"
+        },
+        "/static/styles.css": {
+          "bytes": 50068,
+          "content_type": "text/css; charset=utf-8"
+        }
+      },
+      "standard": {
+        "run_id": "run-8853aaa7815146deb436d61102706bba",
+        "status": "completed",
+        "stop_reason": "verified_supported",
+        "metrics": {
+          "tools": 1,
+          "steps": 1,
+          "model_calls": 0,
+          "evidence": 1,
+          "attempts": 1,
+          "duration_ms": 133
+        },
+        "provider_requests": 0,
+        "event_count": 31,
+        "evidence_ids": [
+          "ev-73e6c3311e2f04817e4680e5beb41728"
+        ]
+      },
+      "downloads": {
+        "json_matches_view": true,
+        "html_escaped": true,
+        "artifact_scoped": true
+      },
+      "parallel": {
+        "run_id": "run-c973f20ad26e40eeb448ea2a321688ee",
+        "status": "completed",
+        "stop_reason": "verified_supported",
+        "metrics": {
+          "tools": 2,
+          "steps": 2,
+          "model_calls": 0,
+          "evidence": 2,
+          "attempts": 1,
+          "duration_ms": 137
+        },
+        "provider_requests": 0,
+        "event_count": 37,
+        "evidence_ids": [
+          "ev-742abbc49ad9930473028aa660f533b6",
+          "ev-26125fb757bc1c1159c395b0915436e7"
+        ]
+      },
+      "recovery": {
+        "run_id": "run-e9234a59ae174909b3b8548eab04f0f5",
+        "status": "completed",
+        "stop_reason": "verified_supported",
+        "metrics": {
+          "tools": 1,
+          "steps": 1,
+          "model_calls": 0,
+          "evidence": 1,
+          "attempts": 2,
+          "duration_ms": 162
+        },
+        "provider_requests": 0,
+        "event_count": 53,
+        "evidence_ids": [
+          "ev-ab04d728cb50d2c1bec303cfb522f016"
+        ],
+        "evidence_identity_preserved": true,
+        "tool_redispatches": 0
+      },
+      "restart": {
+        "persisted_runs": 3,
+        "results_unchanged": true
+      }
+    }
+  },
+  "outside_checkout": true,
+  "temporary_environment_removed": true
+}
