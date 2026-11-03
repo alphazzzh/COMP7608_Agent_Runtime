@@ -24,7 +24,7 @@
 | `uv build` | sdist与wheel通过 |
 | `uv run --frozen python scripts/verify_installed_web.py` | 源码外全新环境、隔离Python及真实本机HTTP验收通过 |
 
-安装证据见[机器可读报告](installed-wheel-web-2026-11-02.json)。最后一项针对0.7.0重新构建的wheel执行；临时环境及验证服务已清理。当前wheel的26个Python/静态文件均与工作区逐字节相同，包SHA-256为：
+原始机器可读报告`installed-wheel-web-2026-11-02.json`只保留在本地，不纳入代码仓库；可按README运行安装验证脚本重新生成。最后一项针对0.7.0重新构建的wheel执行；临时环境及验证服务已清理。当时wheel的26个Python/静态文件均与工作区逐字节相同，包SHA-256为：
 
 ```text
 8b73306b38c40bc8eabbdb813d9779983cb555da7fe77a6eb05699919e5909f6
@@ -57,7 +57,7 @@
 
 实际下载恢复任务的JSON和HTML，以及评估`evaluation-107e31e2171d4f9d95cb32682df9ba17.json`；后者已核对报告ID、导入来源和全部指标仍为null。界面验收的评估文件明确注明任务数仅为UI测试输入，不能作为benchmark成绩。
 
-截图：[桌面工作台](../output/web/project-workspace-desktop.jpg)、[手机历史页](../output/web/project-workspace-mobile.jpg)。
+桌面和手机验收截图只保留在本地`runtime/output/web/`，不纳入代码仓库。
 
 ## 0.7.0迁移审查
 
@@ -100,8 +100,8 @@
 
 | 版本与记录 | 实际结论 |
 |---|---|
-| 0.4.0，2026-11-01，[进程退出与恢复证据](installed-wheel-recovery-2026-11-01.json) | 源码外独立进程在响应保存后SIGKILL退出（-9）；新进程恢复成功，无新目录/数据工具派发，证据身份保留、两段审计、再次resume复用终态。该报告的包哈希和14个源码哈希只属于当时0.4.0，不与当前0.7.0混用。 |
-| 0.3.0，2026-10-28，[真实模型并行报告](parallel-live-acceptance-2026-10-28.json) | 使用真实JsonPlanner和合成数据/内容端口，两个独立工具实际重叠执行；三次HTTP响应依次200、200、403，最终failed/module_error、passed=false。finish、compose/verify及最终双来源答案引用未完成；failure=null只表示脚本没有未处理异常。 |
+| 0.4.0，2026-11-01，本地`installed-wheel-recovery-2026-11-01.json` | 源码外独立进程在响应保存后SIGKILL退出（-9）；新进程恢复成功，无新目录/数据工具派发，证据身份保留、两段审计、再次resume复用终态。该报告的包哈希和14个源码哈希只属于当时0.4.0，不与当前0.7.0混用；原始JSON不纳入代码仓库。 |
+| 0.3.0，2026-10-28，本地`parallel-live-acceptance-2026-10-28.json` | 使用真实JsonPlanner和合成数据/内容端口，两个独立工具实际重叠执行；三次HTTP响应依次200、200、403，最终failed/module_error、passed=false。finish、compose/verify及最终双来源答案引用未完成；failure=null只表示脚本没有未处理异常。原始JSON不纳入代码仓库。 |
 
 早期0.2.0模型专项只验证正常inspect/read/query/finish流程；可修正工具错误后的重新规划由离线回归覆盖。它不构成真实错误恢复或真实检索质量证明。上述历史模型结果不代表服务目前仍可用，本轮工作台开发和文档整理没有重新请求外部模型。
 

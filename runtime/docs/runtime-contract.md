@@ -2,7 +2,7 @@
 
 **更新日期：** 2026-11-02（核心契约 v0.5；持久恢复首次发布于包 0.4.0）
 
-**状态：** 当前运行时包 `0.7.0` 沿用本核心契约；v0.5 在既有受控工具并行基础上增加可选持久调用状态与严格同版本恢复。后续工作台与服务端执行配置不改变核心端口；其接入与HTTP接口见[项目工作台说明](runtime/docs/project-workspace.md)。此状态不构成真实数据或模型联调通过声明。
+**状态：** 当前运行时包 `0.7.0` 沿用本核心契约；v0.5 在既有受控工具并行基础上增加可选持久调用状态与严格同版本恢复。后续工作台与服务端执行配置不改变核心端口；其接入与HTTP接口见[项目工作台说明](project-workspace.md)。此状态不构成真实数据或模型联调通过声明。
 
 **范围：** 定义运行控制器（任务规划与运行控制）与调用方、数据模块、内容模块、规划器及 trace 的输入输出。Harness 面向通用异构数据池；Lake 数据集只用于评测，在线控制策略不读取其标签，也不预设某个数据集的工具名称或数据格式。Python 包名保持 `lake_agent`。
 
@@ -62,7 +62,7 @@ async def resume(
 
 持久模式要求 trace 实现 `create_attempt(run_id, attempt_id)`，内置 sink 写入 `<root>/<run_id>/attempts/<attempt_id>/events.jsonl`；每段序号独立，`detail.replayed=true` 标识历史调用事件。普通模式保留 `<root>/<run_id>/events.jsonl`。正常终态复用不创建新审计段。此接口不承诺任意协程指令恢复、跨版本迁移或外部工具 exactly-once。
 
-完整接入示例及错误码见 [持久恢复说明](runtime/docs/durable-recovery.md)。JSON `schema_version` 仍为 `1.0`，当前包为 `0.7.0`，本文档为 v0.5；三者独立。
+完整接入示例及错误码见 [持久恢复说明](durable-recovery.md)。JSON `schema_version` 仍为 `1.0`，当前包为 `0.7.0`，本文档为 v0.5；三者独立。
 
 ### `RunRequest`
 
@@ -712,6 +712,6 @@ class AttemptTraceSink(TraceSink, Protocol):
 - DeepSeek AI, [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), MIT License；2026-10-22 核验的 `master` commit 为 [`687f282e8625c6b8d11ff58211a90524be2e4317`](https://github.com/deepseek-ai/deepseek-harness/commit/687f282e8625c6b8d11ff58211a90524be2e4317)。README 将其标为 developer preview 并警告会有 breaking changes；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/SAFETY.md) 说明它未经过安全审计，不应当作 production-ready 系统。本提案只借鉴设计，不引入其代码或依赖。
 - DeepSeek Harness 的 [tool lifecycle](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/docs/tool-execution-pipeline.md)、[agent lifecycle](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/docs/agent-lifecycle.md) 与 [session log](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/core/session/README.md)：工具派发有 pre/execute/post 阶段，调用和结果用事件配对；实现含有界并发和按请求顺序提交结果的 scheduler，并把模型可见事实写入 append-only typed event log。运行控制器采纳显式 start/end trace、取消分离和预算受控原则；此前顺序执行基线在 v0.4 扩展为本契约定义的串行准备、并行工具 I/O、稳定串行提交批次。`idempotent` 不等价于 `parallel_safe`，并行必须显式授权并受来源、资源、依赖和预算限制。
 - DeepSeek Harness 的 [core architecture](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/docs/architecture.md) 与 [agent-loop tool scheduler](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/core/agent-loop/src/tool-calls.ts)：分别区分持久事件与运行时事件、显式取消和受限并发。此项目使用 Python async ports 和轻量 JSONL sink；不引入该框架的 Cordis 插件树、Node/TypeScript 工具链、web/desktop组件、sandbox、审批、PTC 或 subagent 运行时。当前项目工作台是独立Python服务与原生网页实现。
-- DeepSeek AI, [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype/tree/6337fc823ce20251c8de8085948165c81aaa701e)，固定提交 `6337fc823ce20251c8de8085948165c81aaa701e`：参考持久意图、SQLite状态与执行尝试分离模式，保持本项目控制器的授权和预算所有权。当前实施状态、源码出处与尚未采用的机制见[源码对照](runtime/docs/dsh-superagent-review-2026-11-01.md)。
+- DeepSeek AI, [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype/tree/6337fc823ce20251c8de8085948165c81aaa701e)，固定提交 `6337fc823ce20251c8de8085948165c81aaa701e`：参考持久意图、SQLite状态与执行尝试分离模式，保持本项目控制器的授权和预算所有权。当前实施状态、源码出处与尚未采用的机制见[源码对照](dsh-superagent-review-2026-11-01.md)。
 
 以上来源用于选择可验证的控制原则，不代表这些 SDK/框架必须成为项目依赖，也不构成项目实现或实验已经完成的证据。

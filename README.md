@@ -1,8 +1,8 @@
-# 异构数据池信息检索 Agent
+# 异构数据池 Agent Runtime
 
 让 Agent 根据自然语言问题发现相关数据，选择工具处理不同格式的资料，汇总多来源证据，并返回带引用的答案。Harness 面向通用异构数据池；LakeQA 只是评测数据集。
 
-正式提案标题为 **An Evidence-Grounded Information-Gathering Agent for Heterogeneous Data Lakes**。实验计划比较完整 Agent、关闭核验与固定检索三种模式，评估答案、检索与证据质量，以及完成率、调用数、耗时和实际用量。
+本仓库只维护 `runtime/` 中的运行时代码、配置、测试和必要的接入文档。课程提案、截图、运行记录与生成报告不纳入同步。
 
 ## 当前交付状态
 
@@ -44,7 +44,7 @@ uv run --extra web --frozen lake-agent-web --data-dir runs/project-workspace
 | 检索与回答 | `ContentPort.prepare_catalog / search / compose / verify` | 注册目录并回传快照/digest、搜索候选来源、根据已接受证据生成带引用答案、核验并提出结构化反馈；四个方法均异步 |
 | Harness 与工作台 | `run / resume`、`PlannerPort`、Web 注册 | 规划、授权、预算、调度、证据身份、恢复、审计和前端；现有代码已提供 |
 
-完整输入、输出、错误与调用约束以[接口契约](运行控制接口与异步执行契约.md)为准。接口已与实现逐项核对；契约描述规范化对象，调用方可省略模型中有默认值的字段。
+完整输入、输出、错误与调用约束以[接口契约](runtime/docs/runtime-contract.md)为准。接口已与实现逐项核对；契约描述规范化对象，调用方可省略模型中有默认值的字段。
 
 建议每个模块先做一个可运行 adapter 和一个小测试：
 
@@ -67,14 +67,13 @@ uv run --extra web --frozen lake-agent-web --data-dir runs/project-workspace
 | 入口 | 内容 |
 |---|---|
 | [运行时 README](runtime/README.md) | Python 调用、模型 API 配置、预算、测试与运行限制 |
-| [核心接口契约](运行控制接口与异步执行契约.md) | 所有模块共享字段、样例与错误语义 |
+| [核心接口契约](runtime/docs/runtime-contract.md) | 所有模块共享字段、样例与错误语义 |
 | [LangGraph流程](runtime/docs/langgraph-workflow.md)、[运行控制器](runtime/src/lake_agent/runtime.py)、[工具调度](runtime/src/lake_agent/tool_runtime.py) | 图编排、安全控制与受控并行执行 |
 | [规划器](runtime/src/lake_agent/planner.py) | OpenAI-compatible API 规划与严格结果解析 |
 | [恢复说明](runtime/docs/durable-recovery.md) | SQLite 状态、调用意图、恢复和未知结果边界 |
 | [工作台说明](runtime/docs/project-workspace.md) | 页面操作、模块注册、HTTP 路由、评估格式 |
 | [验收记录](runtime/docs/project-workspace-acceptance-2026-11-02.md) | 当前验证与真实集成边界 |
 | [公开源码对照](runtime/docs/dsh-superagent-review-2026-11-01.md) | 恢复设计参考与采用范围 |
-| [提案源](proposal/proposal.tex)、[样式](proposal/neurips_2026.sty)、[PDF](proposal/build/proposal.pdf)、[Overleaf 包](proposal/proposal.zip) | 正式课程提案及可编辑文件 |
 
 ## 本地复核与上传范围
 
@@ -90,4 +89,4 @@ uv run --frozen python scripts/verify_installed_web.py --report runs/installed-w
 
 离线测试不发外部模型请求；安装验证默认从本机缓存装依赖，冷缓存时需加 `--allow-downloads`，仍不请求模型。只有 `scripts/live_*` 是额外的付费联网专项，运行前需检查其参数及服务限制。
 
-此目录可作为仓库根目录；提交源代码、`uv.lock`、测试、现行文档、提案与精选验收截图。`.gitignore` 已排除虚拟环境、运行历史、构建包、临时输出、系统文件与本地密钥配置。API key 只从服务端环境或本地私密配置读取；`.gitignore` 不替代提交前检查。当前网页没有登录、多用户权限或公网部署能力。
+根目录仅跟踪本 README、`.gitignore` 与 `runtime/`。其中提交源代码、`pyproject.toml`、`uv.lock`、测试、脚本和必要的接入文档；提案、截图、生成的验收 JSON、虚拟环境、运行历史、构建包、系统文件和本地密钥配置均不提交。API key 只从服务端环境或本地私密配置读取；`.gitignore` 不替代提交前检查。当前网页没有登录、多用户权限或公网部署能力。

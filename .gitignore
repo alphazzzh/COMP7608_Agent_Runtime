@@ -1,4 +1,11 @@
-# Local environments, generated runtime state and build output.
+# 仓库只同步 runtime；根目录仅保留入口说明和本忽略规则。
+# 采用允许清单，防止 proposal、课程资料或其他本地目录被意外提交。
+/*
+!/.gitignore
+!/README.md
+!/runtime/
+
+# 本地环境、生成的运行状态与构建输出。
 .venv/
 venv/
 __pycache__/
@@ -14,14 +21,12 @@ dist/
 runtime/build/
 runs/
 
-# Keep only the reviewed screenshots referenced by the acceptance record.
-/runtime/output/*
-!/runtime/output/web/
-/runtime/output/web/*
-!/runtime/output/web/project-workspace-desktop.jpg
-!/runtime/output/web/project-workspace-mobile.jpg
+# 截图和机器生成的验收报告只保留在本地，不属于代码交付。
+/runtime/output/
+/runtime/docs/installed-wheel-*.json
+/runtime/docs/parallel-live-acceptance-*.json
 
-# OS/editor metadata and local credentials; examples may be committed.
+# 系统、编辑器和本地凭据；脱敏示例配置可以提交。
 .DS_Store
 ._*
 __MACOSX/
@@ -35,7 +40,12 @@ __MACOSX/
 *.p12
 *.pfx
 
-# LaTeX intermediates; retain the PDF and editable proposal sources.
+# 运行时目录内也不提交课程提案或 LaTeX 产物。
+/runtime/proposal/
+*.tex
+*.sty
+*.pdf
+*.zip
 *.aux
 *.log
 *.out
