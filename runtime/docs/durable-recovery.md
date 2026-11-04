@@ -2,13 +2,15 @@
 
 持久模式为异构数据池的单控制器保存原请求、调用意图和已验证响应。进程中断后，控制器通过这些已知响应重新建立证据、观察、步骤与预算状态，再决定是否继续新工作。它复用现有授权和调度规则；Lake 数据集仍仅是评测载体。
 
+公开入口保留在 [runtime.py](../src/lake_agent/runtime.py)，SQLite 存储保留在 [state.py](../src/lake_agent/state.py)。恢复协调器归入 [engine/recovery.py](../src/lake_agent/engine/recovery.py)，图执行收尾归入 [engine/graph_runner.py](../src/lake_agent/engine/graph_runner.py)；调用方无需依赖这些内部模块。目录完整映射见[源码目录说明](source-layout.md)。
+
 ## 接口与资源生命周期
 
 普通 `run(request, *, data, content, planner, trace)` 保持原行为。传入 `state_store=SqliteStateStore(path)` 后启用持久模式；后续调用 `resume(run_id, *, data, content, planner, trace, state_store)` 使用数据库中的原请求，无需也不接受一份替代请求。
 
 调用方在首次运行前设置并保存唯一 `RunRequest.run_id`；自动生成的 ID 若尚未返回就遇到进程退出，应用可能无法定位要恢复的运行。再次调用 `run` 不能覆盖数据库中的同名运行；已有运行使用 `resume`。
 
-每次执行尝试都重新创建 `DataPort`、`ContentPort`、`PlannerPort` 和 TraceSink 实例。新进程不能依赖旧实例的缓存、打开连接或临时 handle。应用负责端口客户端的创建与关闭，且需要保证新实例仍履行原数据快照和工具语义契约。凭据继续由适配器配置持有，不应混入请求、工具参数或持久状态。
+每次执行尝试都重新创建 `DataPort`、`ContentPort`、`AgentPlannerPort` 和 TraceSink 实例。新进程不能依赖旧实例的缓存、打开连接或临时 handle。应用负责端口客户端的创建与关闭，且需要保证新实例仍履行原数据快照和工具语义契约。凭据继续由适配器配置持有，不应混入请求、工具参数或持久状态。
 
 StateStore 由调用方持有；`run` 和 `resume` 在退出时释放各自租约，但不会关闭调用方的存储对象。应用应使用 `try/finally` 调用 `await store.aclose()`。同一存储可保留到应用生命周期结束，也可在后续进程中用同一路径创建新实例。
 
@@ -89,6 +91,8 @@ runs/
 
 恢复严格要求相同的运行时版本、实际 Python 源文件摘要，以及LangGraph、LangChain-Core、checkpoint和LangSmith依赖版本；仅保留相同包版本号不足以通过源码校验。继续未终结运行时还要求相同的可信工具契约；复用已保存终态时不重新读取工具清单。工具摘要来自重新校验的 `DataPort.tool_specs()`，包括工具 schema 和可信能力声明。新端口仍须遵守原不可变数据快照的语义；控制器不会将恢复当作跨数据版本迁移。
 
+源码摘要覆盖根目录公共 Python 模块，并递归包含 `engine/` 与 `adapters/`，以包内相对路径和文件内容共同计算。`evaluation/` 报告格式及 `web/` 展示层不参与执行身份计算。此次目录迁移会改变摘要，因此旧版本未终结运行不能直接恢复；不修改原数据库，也不进行跨版本迁移。
+
 控制器按稳定调用 ID 查找历史响应，不按并行 worker 的返回顺序读取。重建时逐项比较 phase 与请求，只规范化随时间变化的 timeout、剩余 wall time，以及经原 snapshot/digest 重新注册确认的内容 handle。请求分叉、未知调用或不兼容记录不会退回一次真实 adapter 调用来“试试看”。
 
 历史响应经过现有控制流程重新结算一次，恢复原证据、观察、身份和已消费预算；历史重试不会再次等待退避时间。全部较早记录匹配后，或匹配记录属于当前已完整准备的工具批次时，才允许越过历史进入新派发。新工作继续受原授权、剩余额度、并行上限、来源冲突与互斥资源规则约束。
@@ -134,11 +138,15 @@ runs/
 专项离线验证入口：
 
 ```bash
-uv run --frozen pytest -q tests/test_state.py tests/test_trace_attempts.py tests/test_recovery_runtime.py
+uv run --extra dev --extra web --frozen pytest -q tests/recovery
 ```
 
-覆盖范围包括真实 SQLite 与跨进程锁、取消等待与资源释放、独立审计尝试、全新端口重建、已知调用不重复派发、预算与原期限保留、辅助目录注册以及未知结果拒绝。离线 fixture 验证控制与持久化行为，不证明真实数据池检索、答案质量或真实模型的恢复联调。
+恢复回归集中于 `tests/recovery/`，更细的文件定位见[测试导航](../tests/README.md)。覆盖范围包括真实 SQLite 与跨进程锁、取消等待与资源释放、独立审计尝试、全新端口重建、已知调用不重复派发、预算与原期限保留、辅助目录注册以及未知结果拒绝。离线 fixture 验证控制与持久化行为，不证明真实数据池检索、答案质量或真实模型的恢复联调。
 
-历史安装脚本`scripts/verify_installed_recovery.py`固定使用0.4.0 wheel，并把打包源码与执行脚本时的工作区源码比较；它是0.4.0的历史安装/崩溃专项入口，不能直接作为当前0.7.0版本的验收命令。历史结果与当前工作台验收的版本范围见[验收记录](project-workspace-acceptance-2026-11-02.md)。
+历史固定版本和合成数据安装专项已移除。当前离线恢复回归包含在 pytest；安装配置验证使用 `scripts/verify_installed_web.py`，不启动服务。历史结果仅适用于其归档版本。
 
 此前受控并行的真实规划器验收在后续请求收到 HTTP 403，完整真实模型流程保持未通过；本次恢复功能不能将该历史失败改写为通过。原始结论与报告入口见[历史专项证据](project-workspace-acceptance-2026-11-02.md#历史专项证据)。
+
+## 自主决策引擎的恢复边界
+
+当前唯一支持 agent-loop-v1，不再保留旧子任务图或协议回退。planner.decide 请求和严格动作响应进入同一调用账本；已完成决策在恢复时复用，不重新询问模型。持久状态保存 planner_engine，重建前检查当前规划器的协议声明。协议变化使用 recovery_engine_mismatch 拒绝，源码或依赖变化仍使用 recovery_version_mismatch。上下文不含瞬时时钟/审计序号，决策轮数与有界页面从已知响应确定性重建；不能重置 max_agent_turns、模型调用数或原运行期限。A/C 端口的恢复协议不变。日常 require_verification=false 和实验 full_agent=true/no_verifier=false 的策略均写入原 RunConfig，恢复不能改变策略；固定检索评估基线不作为应用执行模式暴露，而由测试侧本地策略复用相同控制器；评估脚本不启用 SQLite 恢复。

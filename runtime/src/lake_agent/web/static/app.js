@@ -8,20 +8,28 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const STATUS = {
-    queued: "排队中", running: "运行中", paused: "已暂停", completed: "已完成",
+    queued: "排队中", running: "运行中", completed: "已完成",
     interrupted: "已中断", failed: "执行错误", blocked: "恢复受阻",
     insufficient_evidence: "证据不足", budget_exceeded: "预算停止", timeout: "执行超时",
     error: "执行错误", cancelled: "已停止",
   };
   const VIEW_TITLES = { workbench: "智能问答", sources: "数据来源", history: "任务历史", evaluations: "实验评估" };
-  const MODE_TITLES = { full_agent: "完整 Agent", no_verifier: "关闭核验", fixed_retrieval: "固定检索" };
+  const MODE_TITLES = { full_agent: "完整 Agent", no_verifier: "关闭核验" };
+  // 固定检索仅是报告中的对照组，不加入执行模式选择器。
+  const EVALUATION_MODE_TITLES = { ...MODE_TITLES, fixed_retrieval: "固定 Top-k 基线" };
   const MODULE_TITLES = { data: "数据模块", planner: "规划模块", content: "内容模块" };
-  const MODULE_STATES = { connected: "已连接", fixture: "示例实现", unavailable: "未就绪" };
+  const MODULE_STATES = { connected: "已连接", unavailable: "未就绪" };
   const METRICS = [
-    ["accuracy", "准确率", "percent"], ["retrieval_precision", "检索精确率", "percent"],
+    ["accuracy", "准确率", "percent"], ["numerical_accuracy", "数值答案准确率", "percent"],
+    ["structured_accuracy", "结构化答案准确率", "percent"], ["retrieval_precision", "检索精确率", "percent"],
     ["retrieval_recall", "检索召回率", "percent"], ["retrieval_f1", "检索 F1", "percent"],
     ["grounding", "证据支撑率", "percent"], ["completion_rate", "完成率", "percent"],
-    ["tool_calls_mean", "平均工具调用", "number"], ["latency_ms_mean", "平均延迟", "milliseconds"],
+    ["valid_tool_call_rate", "有效工具调用率", "percent"], ["unnecessary_tool_call_rate", "不必要工具调用率", "percent"],
+    ["retry_recovery_rate", "重试恢复率", "percent"], ["tool_calls_mean", "平均工具调用", "number"],
+    ["data_calls_mean", "平均数据调用", "number"], ["latency_ms_mean", "平均延迟", "milliseconds"],
+    ["external_data_bytes_total", "外部数据访问字节", "number"], ["external_data_cost_usd", "外部数据费用（USD）", "currency"],
+    ["provider_requests_total", "模型请求总量", "number"], ["input_tokens_total", "输入 Token 总量", "number"],
+    ["output_tokens_total", "输出 Token 总量", "number"],
     ["token_total", "Token 总量", "number"], ["cost_usd", "费用（USD）", "currency"],
   ];
   const MAX_EVALUATION_BYTES = 128 * 1024;
@@ -30,6 +38,9 @@
     "run.finished": "运行结束", "run.failed": "运行失败", "run.cancelled": "执行已停止",
     "run.stopped": "执行停止", "catalog.page": "读取数据目录", "catalog.loaded": "数据目录就绪",
     "task_plan.accepted": "任务规划已确认", "plan.accepted": "工具计划已确认",
+    "task_plan.updated": "更新任务计划", "agent.decision.accepted": "模型已选择下一步",
+    "agent.action.rejected": "动作未获准", "agent.stopped": "模型选择停止", "catalog.read": "查看来源目录",
+    "content.output.rejected": "内容输出未获接纳", "content.feedback.resolved": "内容错误已修正",
     "evidence.added": "证据已保存", "observation.added": "工具结果已记录",
     "verification": "核验答案", "step.state": "更新执行步骤", "tool.replan_requested": "调整工具计划",
   };
@@ -37,6 +48,7 @@
     catalog: "读取数据目录", "content.prepare_catalog": "准备检索目录",
     "content.search": "检索相关来源", "content.compose": "组合答案",
     "content.verify": "核验答案", "planner.decompose": "分解问题",
+    "planner.decide": "决定下一步",
     "planner.select_tools": "选择执行工具", tool: "调用工具",
   };
   const state = {
@@ -90,11 +102,11 @@
   function selectedProfile() { return state.profiles.find((profile) => profile.profile_id === state.profileId); }
   function runTitle(run) {
     return run?.profile?.title || state.profiles.find((profile) => profile.profile_id === run?.profile_id)?.title
-      || state.info?.scenarios?.find((item) => item.id === run?.scenario)?.title || run?.profile_id || run?.scenario || "历史任务";
+      || run?.profile_id || "历史任务";
   }
   function runStatus(run) {
     if (!run) return null;
-    if (isActive(run) || ["paused", "interrupted", "blocked"].includes(run.status)) return run.status;
+    if (isActive(run) || ["interrupted", "blocked"].includes(run.status)) return run.status;
     return run.result?.status || run.status;
   }
   function safeArray(value) { return Array.isArray(value) ? value : []; }
@@ -132,6 +144,8 @@
         credentials: "same-origin", cache: "no-store", ...options, signal: controller.signal,
         headers: { Accept: "application/json", ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers },
       });
+      // 删除接口成功时返回 204；此时没有 JSON 正文。
+      if (response.status === 204 && response.ok) return null;
       let body;
       try { body = await response.json(); }
       catch { throw new Error(`服务返回了无法读取的数据（HTTP ${response.status}）。`); }
@@ -155,6 +169,7 @@
 
   function setView(view, focus = false) {
     if (!Object.hasOwn(VIEW_TITLES, view)) return;
+    if (view === "evaluations" && state.info?.features?.evaluations !== true) view = "workbench";
     state.view = view;
     for (const button of document.querySelectorAll("[data-view]")) {
       const selected = button.dataset.view === view;
@@ -199,10 +214,16 @@
     const profile = selectedProfile();
     const summary = $("profile-summary");
     if (!profile) {
-      summary.replaceChildren(node("p", "loading-copy", "服务未提供可用执行配置。"));
-      $("profile-description").textContent = "";
-      $("profile-readiness").textContent = "暂无执行配置，无法提交任务。";
+      state.profileId = null;
+      summary.replaceChildren(node("p", "loading-copy", "尚未配置执行模块。"));
+      $("profile-description").textContent = "请在服务端配置数据、规划与内容模块后重新启动。";
+      $("profile-readiness").textContent = "配置完成后，可在此选择数据池并提交任务。";
+      $("profile-readiness").classList.add("is-unavailable");
       $("workspace-kind").textContent = "暂无配置";
+      $("workspace-kind").classList.remove("is-project");
+      $("environment-title").textContent = "尚未配置执行模块";
+      $("environment-description").textContent = "等待服务端加载执行配置";
+      $("question-hint").textContent = "请完成服务端配置后重新启动。";
       $("suggested-questions").replaceChildren();
       $("question").disabled = true;
       renderControls();
@@ -226,14 +247,14 @@
     summary.replaceChildren(dataset, modules);
     $("profile-description").textContent = profile.description || "";
     $("profile-readiness").textContent = profile.ready
-      ? `${profile.kind === "demo" ? "示例配置已就绪 · 合成数据与离线模块" : "项目配置已就绪"} · 模型 ${profile.model_id || "未提供"} · 单任务时限 ${formatDuration(profile.max_wall_time_ms)}`
+      ? `项目配置已就绪 · 模型 ${profile.model_id || "未提供"} · 单任务时限 ${formatDuration(profile.max_wall_time_ms)}`
       : `配置尚未就绪：${profile.unavailable_reason || "执行模块尚未连接。请选择已就绪配置，或等待项目模块接入。"}`;
     $("profile-readiness").classList.toggle("is-unavailable", !profile.ready);
-    $("workspace-kind").textContent = profile.kind === "demo" ? "示例数据配置" : "项目数据配置";
-    $("workspace-kind").classList.toggle("is-project", profile.kind !== "demo");
-    $("environment-title").textContent = profile.kind === "demo" ? "示例数据池" : "项目数据池";
+    $("workspace-kind").textContent = "项目数据配置";
+    $("workspace-kind").classList.add("is-project");
+    $("environment-title").textContent = profile.dataset_name || "项目数据池";
     $("environment-description").textContent = profile.ready ? "所选配置已就绪" : "等待模块接入";
-    $("question-hint").textContent = profile.kind === "demo" ? "此配置使用合成数据与离线模块，不代表真实检索质量。" : "问题将由所选项目配置的数据、规划与内容模块处理。";
+    $("question-hint").textContent = "问题将由所选项目配置的数据、规划与内容模块处理。";
     $("question").disabled = false;
     const suggestions = document.createDocumentFragment();
     for (const question of safeArray(profile.suggested_questions).slice(0, 3)) {
@@ -251,16 +272,15 @@
       const select = $(id);
       const fragment = document.createDocumentFragment();
       for (const profile of state.profiles) {
-        const option = node("option", "", `${profile.title} · ${profile.ready ? (profile.kind === "demo" ? "示例可运行" : "已就绪") : "未就绪"}`);
+        const option = node("option", "", `${profile.title} · ${profile.ready ? "已就绪" : "未就绪"}`);
         option.value = profile.profile_id;
         fragment.append(option);
       }
-      if (!state.profiles.length) fragment.append(node("option", "", "暂无执行配置"));
+      if (!state.profiles.length) fragment.append(node("option", "", "尚未配置执行模块"));
       select.replaceChildren(fragment);
       select.disabled = !state.profiles.length;
     }
-    const initial = state.profiles.find((profile) => profile.profile_id === "project-default")
-      || state.profiles.find((profile) => profile.kind === "project") || state.profiles[0];
+    const initial = state.profiles.find((profile) => profile.ready) || state.profiles[0];
     selectProfile(state.profiles.some((profile) => profile.profile_id === state.profileId) ? state.profileId : initial?.profile_id, !state.profileId);
     if (!selectedProfile()) renderProfile();
     if (!state.profiles.some((profile) => profile.profile_id === state.sourcesProfileId)) state.sourcesProfileId = initial?.profile_id || null;
@@ -272,6 +292,19 @@
 
   function renderInfo() {
     $("app-version").textContent = state.info?.version ? `v${state.info.version}` : "Agent Harness";
+    // 实验能力由可信服务端显式开放；正式入口默认只有完整 Agent。
+    const modes = safeArray(state.info?.enabled_modes).filter((mode) => Object.hasOwn(MODE_TITLES, mode));
+    const enabled = modes.length ? modes : ["full_agent"];
+    const previous = $("mode").value;
+    $("mode").replaceChildren(...enabled.map((mode) => {
+      const option = node("option", "", MODE_TITLES[mode]);
+      option.value = mode;
+      return option;
+    }));
+    $("mode").value = enabled.includes(previous) ? previous : enabled[0];
+    $("mode").disabled = enabled.length === 1;
+    document.querySelector('[data-view="evaluations"]').hidden = state.info?.features?.evaluations !== true;
+    if (state.view === "evaluations" && state.info?.features?.evaluations !== true) setView("workbench");
     renderCapabilities();
   }
 
@@ -282,7 +315,7 @@
       const header = node("div", "capability-card-header");
       const status = String(capability.status || "");
       const pending = /pending|planned|incomplete|todo|待|未完成|未接入/i.test(status);
-      const labels = { ready: "已具备", complete: "已完成", completed: "已完成", available: "可演示", implemented: "已实现", verified: "已验证", pending: "待联调", planned: "计划中", demo: "演示实现" };
+      const labels = { ready: "已具备", complete: "已完成", completed: "已完成", available: "可使用", implemented: "已实现", verified: "已验证", pending: "待联调", planned: "计划中" };
       header.append(node("h3", "", capability.name), node("span", `capability-status${pending ? " pending" : ""}`, labels[status] || status || "状态未提供"));
       card.append(header, node("p", "", capability.description));
       fragment.append(card);
@@ -306,6 +339,11 @@
     $("cancel-run").disabled = state.mutation;
     $("resume-run").hidden = !run?.can_resume || isActive(run);
     $("resume-run").disabled = state.mutation;
+    $("delete-run").disabled = state.mutation || !run || isActive(run);
+    $("delete-run").title = isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
+    for (const button of document.querySelectorAll('[data-action="delete"]')) {
+      button.disabled = state.mutation || button.dataset.active === "true";
+    }
     if (run) {
       const prefix = `/api/runs/${encodeURIComponent(run.run_id)}`;
       $("download-json").href = prefix + "/export";
@@ -319,6 +357,7 @@
       const result = await api("/api/runs");
       if (version !== state.historyVersion) return;
       state.runs = safeArray(result.runs);
+      renderTimelineTasks();
       setConnection(true);
       const signature = JSON.stringify(state.runs);
       if (signature !== state.historySignature) {
@@ -340,25 +379,30 @@
   function renderRecentRuns() {
     $("nav-history-count").textContent = state.runs.length;
     const focusedId = $("recent-runs").contains(document.activeElement) ? document.activeElement?.dataset?.runId : null;
+    const focusedAction = document.activeElement?.dataset?.action;
     const fragment = document.createDocumentFragment();
     for (const run of state.runs.slice(0, 5)) {
+      const row = node("div", "recent-run-row");
       const button = node("button", `recent-run${run.run_id === state.selectedRunId ? " is-selected" : ""}`);
       button.type = "button";
       button.dataset.runId = run.run_id;
+      button.dataset.action = "open";
       button.setAttribute("aria-label", `${STATUS[runStatus(run)] || runStatus(run)}：${run.question}`);
       const dot = node("span", `run-dot ${Object.hasOwn(STATUS, runStatus(run)) ? runStatus(run) : ""}`);
       dot.setAttribute("aria-hidden", "true");
       button.append(dot, node("strong", "", run.question), node("small", "", `${runTitle(run)} · ${dateLabel(run.created_at)}`));
       button.addEventListener("click", () => openRun(run.run_id));
-      fragment.append(button);
+      row.append(button, deleteButton(run));
+      fragment.append(row);
     }
     if (!state.runs.length) fragment.append(node("p", "sidebar-empty", "还没有运行记录。\n从右侧开始一次探索。"));
     $("recent-runs").replaceChildren(fragment);
-    if (focusedId) Array.from($("recent-runs").querySelectorAll("button")).find((button) => button.dataset.runId === focusedId)?.focus({ preventScroll: true });
+    if (focusedId) Array.from($("recent-runs").querySelectorAll("button")).find((button) => button.dataset.runId === focusedId && button.dataset.action === focusedAction)?.focus({ preventScroll: true });
   }
 
   function renderHistory() {
     const focusedId = $("history-list").contains(document.activeElement) ? document.activeElement?.dataset?.runId : null;
+    const focusedAction = document.activeElement?.dataset?.action;
     const query = $("history-search").value.trim().toLocaleLowerCase();
     const filter = $("history-filter").value;
     const runs = state.runs.filter((run) => {
@@ -369,9 +413,11 @@
     $("history-count").textContent = `${runs.length} / ${state.runs.length} 次任务`;
     const fragment = document.createDocumentFragment();
     for (const run of runs) {
+      const row = node("div", "history-card-row");
       const card = node("button", "history-card");
       card.type = "button";
       card.dataset.runId = run.run_id;
+      card.dataset.action = "open";
       const top = node("div", "history-card-top");
       top.append(node("strong", "", runTitle(run)), statusBadge(runStatus(run)), node("span", "history-card-time", dateLabel(run.created_at)));
       const meta = node("div", "history-card-meta");
@@ -380,7 +426,8 @@
       arrow.setAttribute("aria-hidden", "true");
       card.append(top, node("h3", "", run.question), meta, arrow);
       card.addEventListener("click", () => openRun(run.run_id));
-      fragment.append(card);
+      row.append(card, deleteButton(run));
+      fragment.append(row);
     }
     if (!runs.length) {
       const empty = emptyState(state.runs.length ? "没有匹配的运行" : "记录从一次提问开始", state.runs.length ? "调整关键词或状态筛选，查找其他运行。" : "在智能问答中选择已就绪的执行配置，提问后即可在这里回看。", "◷");
@@ -388,11 +435,80 @@
       fragment.append(empty);
     }
     $("history-list").replaceChildren(fragment);
-    if (focusedId) Array.from($("history-list").querySelectorAll("button")).find((button) => button.dataset.runId === focusedId)?.focus({ preventScroll: true });
+    if (focusedId) Array.from($("history-list").querySelectorAll("button")).find((button) => button.dataset.runId === focusedId && button.dataset.action === focusedAction)?.focus({ preventScroll: true });
   }
 
   function rememberRun(runId) {
     try { window.localStorage.setItem("agent-lab:last-run", runId); } catch { /* 本地存储可能被禁用，但仍可通过 API 查看历史记录。 */ }
+  }
+
+  /** 删除按钮与打开按钮并列，避免嵌套交互控件；服务端仍负责最终运行状态校验。 */
+  function deleteButton(run) {
+    const button = node("button", "button button-small button-delete", "删除");
+    button.type = "button";
+    button.dataset.runId = run.run_id;
+    button.dataset.action = "delete";
+    button.dataset.active = String(isActive(run));
+    button.disabled = state.mutation || isActive(run);
+    button.title = isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
+    button.setAttribute("aria-label", `删除任务：${run.question}`);
+    button.addEventListener("click", () => deleteRun(run.run_id));
+    return button;
+  }
+
+  /** 仅在后端确认删除后清理视图，并使删除前发出的读取失效，防止旧响应恢复已删内容。 */
+  function forgetRun(runId) {
+    state.historyVersion += 1;
+    state.historySignature = null;
+    state.runs = state.runs.filter((run) => run.run_id !== runId);
+    state.artifactCache.clear();
+    try {
+      if (window.localStorage.getItem("agent-lab:last-run") === runId) window.localStorage.removeItem("agent-lab:last-run");
+    } catch { /* 浏览器可禁用本地偏好存储；服务端删除不依赖它。 */ }
+    if (state.selectedRunId === runId) {
+      state.runVersion += 1;
+      state.selectionVersion += 1;
+      state.inspectorVersion += 1;
+      state.selectedRunId = null;
+      state.run = null;
+      state.selectedEventKey = null;
+      state.renderSignature = null;
+      state.lastPollError = null;
+      $("selected-run-question").textContent = "";
+      $("selected-run-label").textContent = "";
+      $("selected-run-id").textContent = "";
+      $("timeline-phase").value = "all";
+      $("timeline-search").value = "";
+      renderRun();
+    }
+    renderRecentRuns();
+    renderHistory();
+    renderTimelineTasks();
+  }
+
+  async function deleteRun(runId) {
+    if (!runId || state.mutation) return;
+    const run = state.selectedRunId === runId && state.run ? state.run : state.runs.find((item) => item.run_id === runId);
+    if (!run) return;
+    if (isActive(run)) { showNotice("请先停止任务，等待清理完成后再删除。"); return; }
+    if (!window.confirm(`删除任务“${run.question}”？\n答案、执行日志、证据工件和 SQLite 恢复记录将一起删除，无法恢复。`)) return;
+    state.mutation = true;
+    renderControls();
+    hideNotice();
+    try {
+      try { await api(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }); }
+      catch (error) { if (error.status !== 404) throw error; }
+      forgetRun(runId);
+      announce("任务及其运行记录已删除。");
+      showNotice("任务及其日志、证据和恢复记录已删除。");
+      await refreshHistory(true);
+    } catch (error) {
+      showNotice(errorMessage(error), true);
+    } finally {
+      state.mutation = false;
+      renderControls();
+      schedulePoll();
+    }
   }
 
   async function openRun(runId, switchView = true) {
@@ -400,6 +516,9 @@
     state.selectionVersion += 1;
     const changed = state.selectedRunId !== runId;
     if (changed) {
+      $("timeline-phase").value = "all";
+      $("timeline-search").value = "";
+      $("timeline").scrollTop = 0;
       state.selectedRunId = runId;
       state.run = null;
       state.selectedEventKey = null;
@@ -476,7 +595,6 @@
     const note = $("run-state-note");
     const status = runStatus(run);
     const messages = {
-      paused: "任务已安全暂停，已保存的证据仍可查看。恢复后沿用原任务的配置、预算与期限。",
       interrupted: "任务因执行中断而停止。恢复前会检查保存状态；存在未知调用结果时会拒绝恢复。",
       blocked: "任务未通过安全恢复检查。可展开执行过程查看已记录的调用。",
       insufficient_evidence: "本次任务证据不足。请检查已保存证据，或调整问题后创建新任务。",
@@ -484,14 +602,96 @@
       timeout: "任务已超过调用或总执行期限。请查看执行过程，了解停止前的已完成工作。",
     };
     const parts = [];
+    const failure = status === "completed" ? null : run?.failure || run?.result?.failure;
+    const diagnosticOpen = Boolean(note.querySelector(".failure-diagnostic[open]"));
     if (messages[status]) parts.push(messages[status]);
     if (run?.resume_blocked_reason) parts.push(`无法恢复：${run.resume_blocked_reason}`);
     if (run?.error) parts.push(typeof run.error === "string" ? run.error : `${run.error.message || "执行未完成"}${run.error.code ? `（${run.error.code}）` : ""}`);
     if (run?.result?.stop_reason && status !== "completed") parts.push(`停止原因：${run.result.stop_reason}`);
-    if (isActive(run) && (run.profile_id === "demo-recovery" || run.scenario === "recovery")) parts.push("此示例会在保存首条证据后暂停，可手动恢复以继续执行。");
+    if (failure?.error) {
+      const phase = PHASE_TITLES[failure.phase] || failure.phase || "执行调用";
+      parts.push(`${phase}：${failureExplanation(failure.error)}（${diagnosticText(failure.error.code, 100)}）`);
+      if (isActive(run)) parts.push("任务仍在运行，模型可根据反馈决定下一步。");
+    }
     note.hidden = !parts.length;
-    note.textContent = parts.join(" ");
+    note.replaceChildren();
+    if (parts.length) note.append(node("p", "failure-summary", parts.join(" ")));
+    if (failure?.error) {
+      const diagnostic = renderFailureDiagnostic(failure);
+      diagnostic.open = diagnosticOpen;
+      note.append(diagnostic);
+    }
     note.classList.toggle("is-error", Boolean(run?.error || run?.resume_blocked_reason) || ["failed", "blocked", "error", "timeout"].includes(status));
+  }
+
+  /** 诊断是未接纳的模型数据，始终按纯文本、有界预览处理。 */
+  function diagnosticText(value, maximum = 600) {
+    let text;
+    try { text = typeof value === "string" ? value : JSON.stringify(value); }
+    catch { text = "无法显示该值"; }
+    text = text ?? "null";
+    return text.length > maximum ? `${text.slice(0, maximum)}…（预览截断）` : text;
+  }
+
+  function failureExplanation(error) {
+    const explanations = {
+      invalid_model_citations: "模型引用了本次证据之外的编号，输出未被接纳。",
+      invalid_model_sources: "模型返回了当前目录之外的来源编号，输出未被接纳。",
+      invalid_model_output: "模型输出未通过 JSON 或结构校验。",
+      invalid_answer_citations: "待核验答案包含当前证据之外的引用。",
+      provider_timeout: "模型请求超过调用期限。",
+      provider_http_error: "模型服务返回了 HTTP 错误。",
+      provider_transport_error: "模型请求在网络传输时失败。",
+      invalid_module_response: "模块响应未通过运行控制器校验。",
+    };
+    return explanations[error.code] || diagnosticText(error.message || "调用未完成", 300);
+  }
+
+  function renderFailureDiagnostic(failure) {
+    const diagnostic = node("details", "failure-diagnostic");
+    diagnostic.append(node("summary", "", "查看错误位置、引用差异与原始记录"));
+    const body = node("div", "failure-diagnostic-body");
+    body.append(node("p", "failure-call", `${PHASE_TITLES[failure.phase] || failure.phase || "执行调用"} · ${diagnosticText(failure.call_id || "未记录调用 ID", 200)}`));
+    body.append(node("p", "failure-message", diagnosticText(failure.error?.message, 1000)));
+    const details = failure.error?.details;
+    if (details && typeof details === "object") {
+      const issues = safeArray(details.issues);
+      if (issues.length) {
+        const list = node("ul", "failure-issues");
+        for (const issue of issues.slice(0, 6)) {
+          const item = node("li");
+          if (!issue || typeof issue !== "object") {
+            item.textContent = diagnosticText(issue);
+            list.append(item);
+            continue;
+          }
+          item.append(node("strong", "", diagnosticText(issue.path || issue.code || "输出字段", 160)));
+          if (Object.hasOwn(issue, "actual")) item.append(node("p", "", `实际值：${diagnosticText(issue.actual)}`));
+          if (Object.hasOwn(issue, "expected")) item.append(node("p", "", `要求：${diagnosticText(issue.expected)}`));
+          if (issue.message) item.append(node("p", "", diagnosticText(issue.message, 300)));
+          list.append(item);
+        }
+        if (issues.length > 6) list.append(node("li", "", `另有 ${issues.length - 6} 项，见原始记录。`));
+        body.append(list);
+      }
+      for (const [key, title] of [["allowed_evidence_ids", "允许引用的证据 ID"], ["allowed_source_ids", "允许使用的来源 ID"]]) {
+        if (Array.isArray(details[key])) body.append(node("p", "failure-allowed", `${title}：${diagnosticText(details[key].slice(0, 8), 1200)}${details[key].length > 8 ? "；其他项见原始记录。" : ""}`));
+      }
+      if (Object.hasOwn(details, "rejected_output")) {
+        const rejected = node("details", "failure-rejected");
+        rejected.append(node("summary", "", "被拒绝的模型输出预览"), node("pre", "", diagnosticText(details.rejected_output, 2000)));
+        body.append(rejected);
+      }
+      if (details.omitted) body.append(node("p", "failure-omitted", `诊断包含省略项：${diagnosticText(details.omitted, 300)}`));
+    } else body.append(node("p", "failure-omitted", "这份记录没有保存具体错误值，无法从摘要还原模型填错的引用。原始请求可用于核对当时允许的证据。"));
+    if (failure.attempt_id && failure.event_seq) {
+      const button = node("button", "text-button", "查看这次调用的原始记录 ↗");
+      button.type = "button";
+      button.addEventListener("click", () => selectEvent(`${failure.attempt_id}:${failure.event_seq}`));
+      body.append(button);
+    }
+    diagnostic.append(body);
+    return diagnostic;
   }
 
   function renderMetrics() {
@@ -508,6 +708,11 @@
   function eventKey(event) { return `${event.attempt_id || ""}:${event.seq}`; }
   function replayed(event) { return event.replayed === true || event.detail?.replayed === true; }
   function eventTitle(event) {
+    if (event.event_type === "agent.action.rejected" && event.detail?.kind === "finish") {
+      // 过期是适用状态已变化，并不表示新的核验已判定答案错误。
+      if (event.detail.code === "verification_stale") return "完成提议未获准 · 核验已过期";
+      if (event.detail.code === "verification_required") return "完成提议未获准 · 需要当前有效的支持核验";
+    }
     if (EVENT_TITLES[event.event_type]) {
       if (event.event_type === "step.state") {
         const stepStates = { pending: "步骤等待执行", running: "步骤开始执行", completed: "步骤执行完成", failed: "步骤执行失败", blocked: "步骤受阻", skipped: "步骤已跳过" };
@@ -523,13 +728,65 @@
     return event.event_type || "执行事件";
   }
 
+  /** 使用独立 run_id 切换每次提问；恢复段继续归属原任务。 */
+  function renderTimelineTasks() {
+    const select = $("timeline-task");
+    const tasks = [...state.runs];
+    if (state.run && !tasks.some((run) => run.run_id === state.run.run_id)) tasks.unshift(state.run);
+    const signature = JSON.stringify([state.selectedRunId, tasks.map((run) => [run.run_id, run.question, run.created_at])]);
+    if (select.dataset.signature !== signature) {
+      const options = document.createDocumentFragment();
+      if (!state.selectedRunId) {
+        const placeholder = node("option", "", "选择一次提问");
+        placeholder.value = "";
+        options.append(placeholder);
+      }
+      for (const run of tasks) {
+        const option = node("option", "", `${run.question} · ${dateLabel(run.created_at)} · ${run.run_id.slice(-8)}`);
+        option.value = run.run_id;
+        option.selected = run.run_id === state.selectedRunId;
+        options.append(option);
+      }
+      select.replaceChildren(options);
+      select.dataset.signature = signature;
+    }
+    select.disabled = !tasks.length;
+    const selected = state.run || tasks.find((run) => run.run_id === state.selectedRunId);
+    $("timeline-context").textContent = selected ? `当前任务：${selected.question}。每次提问单独记录。` : "每次提问单独记录；选择任务后查看对应的执行过程。";
+  }
+
+  function timelinePhase(event) {
+    const type = String(event.event_type || "");
+    if (type.startsWith("catalog.") || type.startsWith("content.prepare_catalog.")) return "catalog";
+    if (type.startsWith("planner.") || type.startsWith("agent.") || type.startsWith("task_plan.")) return "planning";
+    if (type.startsWith("content.compose.") || type.startsWith("content.verify.") || type === "verification" || ["content.output.rejected", "content.feedback.resolved"].includes(type)) return "answer";
+    if (/^(tool\.|content\.search\.|plan\.|step\.|subtask\.|evidence\.|observation\.)/.test(type)) return "execution";
+    return "state";
+  }
+
   function renderTimeline() {
-    const events = safeArray(state.run?.events);
-    $("event-count").textContent = `${events.length} 个事件`;
+    renderTimelineTasks();
+    const allEvents = safeArray(state.run?.events);
+    const phase = $("timeline-phase").value;
+    const query = $("timeline-search").value.trim().toLocaleLowerCase();
+    const filtering = phase !== "all" || Boolean(query);
+    const events = allEvents.filter((event) => (phase === "all" || timelinePhase(event) === phase)
+      && (!query || `${eventTitle(event)} ${event.seq} ${event.event_type} ${event.step_id || ""} ${event.error?.code || ""} ${event.error?.message || ""} ${JSON.stringify(event.detail || {})}`.toLocaleLowerCase().includes(query)));
+    $("event-count").textContent = `本任务 ${allEvents.length} 个事件`;
+    $("timeline-count").textContent = `显示 ${events.length} / ${allEvents.length} 个事件`;
     const container = $("timeline");
+    const sameRun = container.dataset.runId === state.selectedRunId;
+    const expanded = new Map(sameRun ? Array.from(container.querySelectorAll(".timeline-stage")).map((group) => [group.dataset.stageKey, group.open]) : []);
+    container.dataset.runId = state.selectedRunId || "";
     const oldScroll = container.scrollTop;
     const nearBottom = container.scrollHeight - container.clientHeight - oldScroll < 45;
     const focusedKey = container.contains(document.activeElement) ? document.activeElement?.dataset?.eventKey : null;
+    const focusedStageKey = container.contains(document.activeElement) && document.activeElement?.tagName === "SUMMARY"
+      ? document.activeElement.closest(".timeline-stage")?.dataset.stageKey : null;
+    if (!events.length && allEvents.length) {
+      container.replaceChildren(emptyState("没有匹配的事件", "调整执行阶段或搜索词，查看本任务的其他记录。", "⌕"));
+      return;
+    }
     if (!events.length) {
       container.replaceChildren(emptyState(state.run ? "等待第一个执行事件" : "每一步，都有迹可循", state.run ? "执行开始后，已保存的事件会自动出现在这里。" : "开始运行后，这里会显示真实的规划、工具调用与证据记录。", "⌁"));
       return;
@@ -541,38 +798,59 @@
       if (!groups.has(id)) groups.set(id, []);
       groups.get(id).push(event);
     }
+    const attemptIds = [...new Set(allEvents.map((event) => event.attempt_id || "initial"))];
     let index = 0;
     for (const [id, records] of groups) {
       index += 1;
       const heading = node("div", "attempt-heading");
-      heading.append(node("strong", "", `尝试 ${String(index).padStart(2, "0")}`), node("span", "", index === 1 ? "首次执行" : "恢复执行"), node("span", "mono", id === "initial" ? "" : id));
+      const attemptNumber = attemptIds.indexOf(id) + 1;
+      heading.append(node("strong", "", `执行 ${String(attemptNumber).padStart(2, "0")}`), node("span", "", attemptNumber === 1 ? "首次执行" : "恢复执行"));
+      heading.title = id;
       fragment.append(heading);
+      // 仅折叠连续的同阶段事件，保持真实审计顺序，不猜测旧记录的子任务归属。
+      const stages = [];
       for (const event of records) {
-        const key = eventKey(event);
-        const failed = Boolean(event.error) || /failed|cancelled/.test(event.event_type || "");
-        const row = node("button", `event-row${replayed(event) ? " is-replayed" : ""}${failed ? " is-error" : ""}${key === state.selectedEventKey ? " is-selected" : ""}`);
-        row.type = "button";
-        row.dataset.eventKey = key;
-        row.setAttribute("aria-label", `${eventTitle(event)}，${dateLabel(event.timestamp_utc, false)}${replayed(event) ? "，历史重放" : ""}，查看记录`);
-        const dot = node("span", "event-dot");
-        dot.setAttribute("aria-hidden", "true");
-        const body = node("span", "event-body");
-        const title = node("span", "event-title", eventTitle(event));
-        if (replayed(event)) title.append(node("span", "replayed-badge", "历史重放"));
-        if (event.data_ref) {
-          const ref = node("span", "event-ref-icon", "↗");
-          ref.setAttribute("aria-hidden", "true");
-          title.append(ref);
+        const kind = timelinePhase(event);
+        if (stages.at(-1)?.kind !== kind) stages.push({ kind, records: [] });
+        stages.at(-1).records.push(event);
+      }
+      for (const stage of stages) {
+        const group = node("details", "timeline-stage");
+        group.dataset.stageKey = `${id}:${stage.records[0].seq}`;
+        const failed = stage.records.some((event) => event.error || /failed|cancelled/.test(event.event_type));
+        group.open = filtering || (expanded.get(group.dataset.stageKey) ?? (failed || (isActive(state.run) && stage === stages.at(-1) && index === groups.size)));
+        const titles = { catalog: "读取目录", planning: "模型规划", execution: "检索与工具", answer: "回答与核验", state: "状态与其他" };
+        const summary = node("summary", "", titles[stage.kind]);
+        summary.append(node("small", "", `${stage.records.length} 个事件 · #${stage.records[0].seq}–${stage.records.at(-1).seq}`));
+        group.append(summary);
+        for (const event of stage.records) {
+          const key = eventKey(event);
+          const failed = Boolean(event.error) || /failed|cancelled/.test(event.event_type || "");
+          const row = node("button", `event-row${replayed(event) ? " is-replayed" : ""}${failed ? " is-error" : ""}${key === state.selectedEventKey ? " is-selected" : ""}`);
+          row.type = "button";
+          row.dataset.eventKey = key;
+          row.setAttribute("aria-label", `${eventTitle(event)}，${dateLabel(event.timestamp_utc, false)}${replayed(event) ? "，历史重放" : ""}，查看记录`);
+          const dot = node("span", "event-dot");
+          dot.setAttribute("aria-hidden", "true");
+          const body = node("span", "event-body");
+          const title = node("span", "event-title", eventTitle(event));
+          if (replayed(event)) title.append(node("span", "replayed-badge", "历史重放"));
+          if (event.data_ref) {
+            const ref = node("span", "event-ref-icon", "↗");
+            ref.setAttribute("aria-hidden", "true");
+            title.append(ref);
+          }
+          const meta = node("span", "event-meta");
+          meta.append(node("span", "", dateLabel(event.timestamp_utc, false)), node("span", "event-type", `#${event.seq} · ${event.event_type}`));
+          if (event.duration_ms !== null && event.duration_ms !== undefined) meta.append(node("span", "", formatDuration(event.duration_ms)));
+          body.append(title, meta);
+          const detail = event.error ? `${diagnosticText(event.error.code, 100)} · ${failureExplanation(event.error)}` : event.detail?.tool_name || event.step_id;
+          if (detail) body.append(node("span", "event-detail-line", detail));
+          row.append(dot, body);
+          row.addEventListener("click", () => selectEvent(key));
+          group.append(row);
         }
-        const meta = node("span", "event-meta");
-        meta.append(node("span", "", dateLabel(event.timestamp_utc, false)), node("span", "event-type", `#${event.seq} · ${event.event_type}`));
-        if (event.duration_ms !== null && event.duration_ms !== undefined) meta.append(node("span", "", formatDuration(event.duration_ms)));
-        body.append(title, meta);
-        const detail = event.error?.message || event.detail?.tool_name || event.step_id;
-        if (detail) body.append(node("span", "event-detail-line", detail));
-        row.append(dot, body);
-        row.addEventListener("click", () => selectEvent(key));
-        fragment.append(row);
+        fragment.append(group);
       }
     }
     container.replaceChildren(fragment);
@@ -580,12 +858,24 @@
       const focusedRow = Array.from(container.querySelectorAll("button")).find((row) => row.dataset.eventKey === focusedKey);
       focusedRow?.focus({ preventScroll: true });
     }
+    if (focusedStageKey) {
+      const focusedGroup = Array.from(container.querySelectorAll(".timeline-stage")).find((group) => group.dataset.stageKey === focusedStageKey);
+      focusedGroup?.querySelector("summary")?.focus({ preventScroll: true });
+    }
     container.scrollTop = nearBottom && isActive(state.run) ? container.scrollHeight : oldScroll;
   }
 
   function selectEvent(key) {
     state.selectedEventKey = key;
+    if (!Array.from($("timeline").querySelectorAll("button")).some((button) => button.dataset.eventKey === key)) {
+      $("timeline-phase").value = "all";
+      $("timeline-search").value = "";
+      renderTimeline();
+    }
     for (const button of $("timeline").querySelectorAll("button")) button.classList.toggle("is-selected", button.dataset.eventKey === key);
+    const row = Array.from($("timeline").querySelectorAll("button")).find((button) => button.dataset.eventKey === key);
+    const group = row?.closest(".timeline-stage");
+    if (group) group.open = true;
     $("audit-details").open = true;
     renderInspector();
   }
@@ -597,8 +887,7 @@
       const run = state.run;
       let title = "让结论有据可依";
       let description = "运行完成后，查看答案、引用的证据以及仍待解决的问题。";
-      if (run?.status === "paused") { title = "证据已保存，等待继续"; description = "恢复运行后，Agent 将继续处理并组合答案。现有证据已可查看。"; }
-      else if (isActive(run)) { title = "正在寻找有依据的答案"; description = "答案会在组合与核验后显示，执行过程与证据正在持续记录。"; }
+      if (isActive(run)) { title = "正在寻找有依据的答案"; description = "答案生成后显示；是否核验取决于运行政策，执行过程与证据正在持续记录。"; }
       else if (run && ["failed", "blocked", "interrupted", "error", "insufficient_evidence", "budget_exceeded", "timeout"].includes(runStatus(run))) { title = "本次运行尚未形成答案"; description = "查看时间线、证据和调用详情，了解停止时已完成的工作。"; }
       container.replaceChildren(emptyState(title, description, "✧"));
       return;
@@ -606,16 +895,26 @@
     const fragment = document.createDocumentFragment();
     const heading = node("div", "answer-title");
     const complete = runStatus(state.run) === "completed";
-    const demo = state.run.profile?.kind === "demo" || String(state.run.profile_id || "").startsWith("demo-") || (!state.run.profile_id && state.run.scenario);
-    heading.append(node("span", "", complete ? "✓" : "ⓘ"), document.createTextNode(`${complete ? "答案已生成" : "当前已保存的答案"} · ${MODE_TITLES[state.run.mode] || state.run.mode}${demo ? " · 示例数据" : ""}`));
-    fragment.append(heading, node("div", "answer-content", answer.text));
+    const answerTitle = complete ? "答案已生成" : "当前已保存的答案";
+    heading.append(node("span", "", complete ? "✓" : "ⓘ"), document.createTextNode(`${answerTitle} · ${MODE_TITLES[state.run.mode] || state.run.mode}`));
+    const content = node("div", "answer-content");
+    for (const [index, paragraph] of String(answer.text).split(/\n\s*\n/).entries()) content.append(node("p", index === 0 ? "answer-lead" : "", paragraph));
+    fragment.append(heading, content);
+    if (complete) fragment.append(node("p", "detail-footnote", "控制器已按当前运行政策接受完成提议。运行完成、内部核验通过和外部评测正确是不同概念；completed 不保证事实正确，核验记录请查看执行过程。"));
     const citations = safeArray(answer.citations);
     if (citations.length) {
       fragment.append(node("h3", "answer-subheading", `依据的证据 · ${citations.length}`));
       const list = node("div", "citation-list");
+      const evidence = safeArray(state.run?.evidence);
+      const references = new Map(evidence.map((record, index) => [record.evidence_id, { record, index }]));
+      const sources = new Map(safeArray(state.run?.sources).map((source) => [source.source_id, source]));
       for (const id of citations) {
-        const button = node("button", "citation-button", id);
+        const { record, index } = references.get(id) || {};
+        const label = record ? `证据 ${index + 1} · ${sources.get(record.source_id)?.name || "未命名来源"}` : "未找到的引用";
+        const button = node("button", "citation-button", label);
         button.type = "button";
+        button.title = record ? locatorLabel(record.locator) : `当前记录中不存在引用 ${id}`;
+        button.setAttribute("aria-label", `${label}，查看证据`);
         button.addEventListener("click", () => revealEvidence(id));
         list.append(button);
       }
@@ -654,6 +953,67 @@
     return JSON.stringify(payload, null, 2);
   }
 
+  /** 只解释已知定位字段，保留原值；未知格式不推断坐标或跳转链接。 */
+  function locatorLabel(locator) {
+    if (!locator || !Object.keys(locator).length) return "未提供定位信息";
+    const labels = [
+      ["table", "表"], ["sheet", "工作表"], ["page", "页"], ["line", "行"],
+      ["row", "行"], ["column", "列"], ["range", "区域"], ["cell", "单元格"],
+      ["path", "路径"], ["json_path", "JSON 路径"], ["pointer", "JSON 指针"], ["query", "查询条件"],
+      ["line_start", "起始行"], ["line_end", "结束行"], ["page_start", "起始页"], ["page_end", "结束页"],
+    ];
+    const parts = [];
+    const understood = new Set(["type"]);
+    for (const [key, label] of labels) {
+      const value = locator[key];
+      if (value === null || value === undefined || typeof value === "object" || value === "") continue;
+      understood.add(key);
+      parts.push(["page", "line", "row", "column"].includes(key) && Number.isSafeInteger(value)
+        ? `第 ${value} ${label}` : `${label}：${String(value)}`);
+    }
+    if (!parts.length) return "定位信息见原始记录";
+    if (Object.keys(locator).some((key) => !understood.has(key))) parts.push("其他定位信息见原始记录");
+    return parts.join(" · ");
+  }
+
+  /** 字段和表格保留原始值；预览有界，完整数据始终可在原始记录中查看。 */
+  function evidencePayload(payload) {
+    const wrapper = node("div", "evidence-payload");
+    if (!payload || typeof payload !== "object") {
+      wrapper.textContent = payloadText(payload);
+      return wrapper;
+    }
+    wrapper.classList.add("is-structured");
+    if (Array.isArray(payload) && payload.length && payload.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+      const keys = [...new Set(payload.slice(0, 10).flatMap((row) => Object.keys(row)))].slice(0, 8);
+      if (!keys.length) {
+        wrapper.append(node("p", "", `${payload.length} 条记录，未提供字段；完整数据见原始记录。`));
+        return wrapper;
+      }
+      const table = node("table", "payload-table");
+      const header = node("tr");
+      for (const key of keys) { const cell = node("th", "", key); cell.scope = "col"; header.append(cell); }
+      const head = node("thead"); head.append(header); table.append(head);
+      const body = node("tbody");
+      for (const row of payload.slice(0, 10)) {
+        const line = node("tr");
+        for (const key of keys) line.append(node("td", "", Object.hasOwn(row, key) ? payloadText(row[key]) : "—"));
+        body.append(line);
+      }
+      table.append(body);
+      const scroll = node("div", "payload-table-scroll");
+      scroll.tabIndex = 0; scroll.setAttribute("aria-label", "证据数据表"); scroll.append(table);
+      wrapper.append(scroll, node("p", "payload-preview-note", "显示前 10 条以内、前 8 个字段；完整数据见原始记录。"));
+    } else {
+      const fields = node("dl", "payload-fields");
+      const entries = Object.entries(payload);
+      for (const [key, value] of entries.slice(0, 12)) fields.append(node("dt", "", Array.isArray(payload) ? `第 ${Number(key) + 1} 项` : key), node("dd", "", payloadText(value)));
+      wrapper.append(entries.length ? fields : node("p", "", "未提供内容"));
+      if (entries.length > 12) wrapper.append(node("p", "payload-preview-note", "显示前 12 项；完整数据见原始记录。"));
+    }
+    return wrapper;
+  }
+
   function renderEvidence() {
     const container = $("panel-evidence");
     const scroll = container.scrollTop;
@@ -661,23 +1021,25 @@
     const sourcesOpen = Boolean(container.querySelector(".source-details[open]"));
     const evidence = safeArray(state.run?.evidence);
     const sources = safeArray(state.run?.sources);
+    const sourcesById = new Map(sources.map((source) => [source.source_id, source]));
     const fragment = document.createDocumentFragment();
-    for (const record of evidence) {
-      const source = sources.find((item) => item.source_id === record.source_id);
+    for (const [index, record] of evidence.entries()) {
+      const source = sourcesById.get(record.source_id);
       const card = node("article", "evidence-card");
       card.dataset.evidenceId = record.evidence_id;
       card.tabIndex = -1;
-      card.setAttribute("aria-label", `证据 ${record.evidence_id}`);
+      card.setAttribute("aria-label", `证据 ${index + 1} · ${source?.name || "未命名来源"}`);
       const heading = node("div", "evidence-heading");
-      heading.append(node("strong", "", source?.name || record.source_id), node("span", "", record.content_type));
-      card.append(heading, node("div", "evidence-id", record.evidence_id), node("p", "evidence-fragment-label", "本次任务实际读取的内容片段"), node("div", "evidence-payload", payloadText(record.payload)));
+      const types = { text: "文字摘录", json: "结构化数据", table: "表格数据" };
+      heading.append(node("strong", "", `证据 ${index + 1} · ${source?.name || "未命名来源"}`), node("span", "", Object.hasOwn(types, record.content_type) ? types[record.content_type] : record.content_type));
+      card.append(heading, node("p", "evidence-fragment-label", "本次实际读取的原文或数据"), evidencePayload(record.payload));
       const metadata = node("dl", "evidence-meta");
-      metadata.append(node("dt", "", "来源"), node("dd", "mono", record.source_id), node("dt", "", "定位"), node("dd", "", JSON.stringify(record.locator || {})));
+      metadata.append(node("dt", "", "位置"), node("dd", "", locatorLabel(record.locator)));
       card.append(metadata);
-      for (const warning of safeArray(record.warnings)) card.append(node("div", "evidence-warning", warning));
+      for (const warning of safeArray(record.warnings)) card.append(node("div", "evidence-warning", `提示：${warning}`));
       const details = node("details", "evidence-data");
       details.open = openRecords.has(record.evidence_id);
-      details.append(node("summary", "", "查看完整证据记录"), jsonBlock(record));
+      details.append(node("summary", "", "查看原始记录与编号"), jsonBlock(record));
       card.append(details);
       fragment.append(card);
     }
@@ -759,6 +1121,11 @@
     const fragment = document.createDocumentFragment();
     fragment.append(label, select, header, tags);
     const pair = callPair(event);
+    const failed = event.error ? event : pair.response?.error ? pair.response : null;
+    if (failed) fragment.append(renderFailureDiagnostic({
+      phase: failed.detail?.phase || failed.event_type.replace(/\.call\..*$/, ""),
+      call_id: failed.call_id, error: failed.error,
+    }));
     const sections = [];
     const addSection = (title, record, empty) => {
       const section = node("section", "inspector-section");
@@ -895,14 +1262,14 @@
     const profile = state.sourceProfile || state.profiles.find((item) => item.profile_id === state.sourcesProfileId);
     $("refresh-sources").disabled = state.sourcesLoading || !state.sourcesProfileId;
     $("source-profile-note").textContent = profile
-      ? `${profile.dataset_name || profile.dataset_id} · ${profile.kind === "demo" ? "示例目录" : "项目注册目录"}${profile.ready ? "" : " · 执行配置尚未就绪"}` : "";
+      ? `${profile.dataset_name || profile.dataset_id} · 项目注册目录${profile.ready ? "" : " · 执行配置尚未就绪"}` : "";
     const query = $("sources-search").value.trim().toLocaleLowerCase();
     const sources = state.sources.filter((source) => `${source.name} ${source.source_id} ${source.format} ${source.summary} ${JSON.stringify(source.metadata || {})}`.toLocaleLowerCase().includes(query));
     $("sources-count").textContent = state.sourcesLoading ? "正在读取…" : `${sources.length} / ${state.sources.length} 个来源`;
     let message = null;
     if (state.sourcesLoading) message = ["正在读取目录", "从所选执行配置读取已注册的来源元数据。"];
     else if (state.sourcesError) message = ["暂时无法读取目录", state.sourcesError];
-    else if (!profile) message = ["暂无执行配置", "服务提供执行配置后，可在这里浏览已注册的数据来源。"];
+    else if (!profile) message = ["尚未配置执行模块", "请在服务端配置执行模块后重新启动，再浏览已注册的数据来源。"];
     else if (!sources.length) message = state.sources.length
       ? ["没有匹配的数据来源", "调整关键词，尝试搜索其他名称、格式或来源 ID。"]
       : ["此配置尚无公开来源目录", "目录由服务端显式注册。接入数据模块并注册来源后，元数据会显示在这里。"];
@@ -1102,7 +1469,7 @@
     metricHeader.scope = "col";
     header.append(metricHeader);
     for (const row of results) {
-      const th = node("th", "", MODE_TITLES[row.mode] || row.mode);
+      const th = node("th", "", EVALUATION_MODE_TITLES[row.mode] || row.mode);
       th.scope = "col";
       header.append(th);
     }
@@ -1184,11 +1551,15 @@
     $("reset-question").addEventListener("click", () => { selectProfile(state.profileId); $("question").focus(); });
     $("cancel-run").addEventListener("click", () => mutateRun("cancel"));
     $("resume-run").addEventListener("click", () => mutateRun("resume"));
+    $("delete-run").addEventListener("click", () => deleteRun(state.selectedRunId));
     $("dismiss-notice").addEventListener("click", hideNotice);
     $("history-search").addEventListener("input", renderHistory);
     $("history-filter").addEventListener("change", renderHistory);
     $("refresh-history").addEventListener("click", () => refreshHistory());
     $("refresh-sidebar").addEventListener("click", () => refreshHistory());
+    $("timeline-task").addEventListener("change", () => openRun($("timeline-task").value));
+    $("timeline-phase").addEventListener("change", renderTimeline);
+    $("timeline-search").addEventListener("input", renderTimeline);
     $("sources-profile").addEventListener("change", () => { state.sourcesProfileId = $("sources-profile").value; refreshSources(); });
     $("sources-search").addEventListener("input", renderSources);
     $("refresh-sources").addEventListener("click", refreshSources);

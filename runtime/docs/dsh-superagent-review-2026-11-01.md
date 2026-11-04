@@ -2,6 +2,8 @@
 
 源码核查日期：2026-11-01；本项目采用情况更新于2026-11-02，对应运行时0.7.0。此文保留固定提交的公开源码出处，并区分已经实现的持久恢复与尚未采用的自主worker机制；恢复模块源码注释也引用本文。
 
+历史说明：本文保留截至 2026-11-02 的架构判断和验收语义，正文中的“当前”指该时点。本仓库源码链接已更新至现行目录位置；现行动作循环与职责划分见[工作流说明](langgraph-workflow.md)及[源码目录说明](source-layout.md)。
+
 ## 来源与判断范围
 
 - 官方仓库为 [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)，2026-10-31 公开，MIT 许可。本次固定检查提交 `6337fc823ce20251c8de8085948165c81aaa701e`，下载并核对 57 个选定文件的 Git blob 哈希，没有执行仓库代码或安装脚本。
@@ -26,14 +28,14 @@
 
 当前运行时0.7.0已提供来源授权、目录快照、统一预算、工具观察与证据隔离、按需分页、完整规划请求字节上限、显式安全的工具并行，以及可选持久状态与恢复。恢复能力自0.4.0发布，核心契约仍为v0.5；不能再将它描述为尚无checkpoint/resume。
 
-[StateStore](../src/lake_agent/state.py)保存原请求、started意图和有效completed响应；[恢复协调器](../src/lake_agent/recovery.py)通过原控制器匹配已知调用重建状态。历史调用不重新派发，任何未知调用结果都拒绝自动恢复，包括声明幂等的工具。原预算和绝对期限保持；每次执行使用独立attempt审计段。详细规则与接入示例见[持久恢复说明](durable-recovery.md)。
+[StateStore](../src/lake_agent/state.py)保存原请求、started意图和有效completed响应；[恢复协调器](../src/lake_agent/engine/recovery.py)通过原控制器匹配已知调用重建状态。历史调用不重新派发，任何未知调用结果都拒绝自动恢复，包括声明幂等的工具。原预算和绝对期限保持；每次执行使用独立attempt审计段。详细规则与接入示例见[持久恢复说明](durable-recovery.md)。
 
 这些是基于公开模式的Python实现，不是运行参考仓库或引入其Harness依赖，也没有复用其完整持久操作队列。JSONL仍是审计，不能代替独立调用账本。模型提议行动，运行控制器继续唯一拥有授权、预算与证据提交。
 
 ## 尚未采用的部分
 
 - 动态worker委派、独立子代理上下文和跨worker消息交付尚未实现。[runtime.py](../src/lake_agent/runtime.py)仍先宏观分解，再顺序推进子任务；当前并行指可信数据工具I/O，不是自主子代理并行，不能直接将共享可变控制器的子任务用gather并发。
-- 带来源引用的长期任务账本和主动上下文选择尚未提供。现有[context.py](../src/lake_agent/context.py)提供有界观察与按需读取，不等于长期记忆。
+- 带来源引用的长期任务账本和主动上下文选择尚未提供。现有[context.py](../src/lake_agent/engine/context.py)提供有界观察与按需读取，不等于长期记忆。
 - 现有重试受调用次数、原期限、幂等和错误类型约束；没有移植参考项目全部provider恢复策略。HTTP403不能通过盲目重试解决，累计token硬预算仍未实现。
 
 持久恢复的离线、进程退出和当前工作台验收集中见[验收记录](project-workspace-acceptance-2026-11-02.md)。这些验证不证明与参考系统能力等价，亦不证明检索质量或性能提升。

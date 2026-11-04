@@ -1,4 +1,4 @@
-# 仓库只同步 runtime；根目录仅保留入口说明和本忽略规则。
+# 仓库只同步 runtime；根目录仅保留入口说明和忽略规则。
 # 采用允许清单，防止 proposal、课程资料或其他本地目录被意外提交。
 /*
 !/.gitignore
@@ -25,6 +25,9 @@ runs/
 /runtime/output/
 /runtime/docs/installed-wheel-*.json
 /runtime/docs/parallel-live-acceptance-*.json
+# 内部工作记忆、设计讨论与执行计划只保留在本地。
+/runtime/docs/superpowers/
+MEMORY.md
 
 # 系统、编辑器和本地凭据；脱敏示例配置可以提交。
 .DS_Store

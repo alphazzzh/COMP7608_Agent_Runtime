@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Annotated, Literal
@@ -16,9 +16,8 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .. import models as m
-from ..ports import ContentPort, DataPort, PlannerPort
+from ..ports import AgentPlannerPort, ContentPort, DataPort
 from ..validation import canonical_json
-from .fixtures import SCENARIOS, demo_ports
 from .storage import WebError
 
 _Id = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")]
@@ -28,7 +27,7 @@ _Label = Annotated[str, Field(min_length=1, max_length=200)]
 class ModuleState(m.Model):
     """说明执行中的某一部分由哪个实现提供。"""
 
-    status: Literal["connected", "fixture", "unavailable"]
+    status: Literal["connected", "unavailable"]
     label: _Label
 
 
@@ -44,7 +43,7 @@ class ProfileMetadata(m.Model):
     profile_id: _Id
     title: _Label
     description: Annotated[str, Field(min_length=1, max_length=2000)]
-    kind: Literal["project", "demo"]
+    kind: Literal["project"]
     dataset_id: _Id
     dataset_name: _Label
     revision: _Label
@@ -60,7 +59,7 @@ class ExecutionPorts:
 
     data: DataPort
     content: ContentPort
-    planner: PlannerPort
+    planner: AgentPlannerPort
 
 
 @dataclass(frozen=True)
@@ -77,7 +76,8 @@ class ExecutionProfile:
     sources: tuple[m.SourceRecord, ...] = ()
     ports_factory: Callable[[], AbstractAsyncContextManager[ExecutionPorts]] | None = None
     run_config: m.RunConfig = field(default_factory=lambda: m.RunConfig(max_wall_time_ms=600_000))
-    pause_after_evidence: bool = False
+    # 连接身份只参与恢复校验，不公开连接地址、选项或凭据。
+    binding_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
         # 将注册信息与可变输入模型分离。下面为每次运行生成的副本，
@@ -101,7 +101,7 @@ class ExecutionProfile:
             "ready": ready,
             "unavailable_reason": None
             if ready
-            else "该配置尚未接入完整执行模块。可选择示例数据池，或由服务端注册数据、规划与检索生成模块。",
+            else "尚未配置完整执行模块。请在服务端配置数据、规划与内容模块后重新启动。",
             "source_count": len(self.sources),
             "model_id": self.run_config.model_id,
             "max_wall_time_ms": self.run_config.max_wall_time_ms,
@@ -115,7 +115,7 @@ class ExecutionProfile:
                     "metadata": self.metadata.model_dump(mode="json"),
                     "sources": [source.model_dump(mode="json") for source in self.sources],
                     "config": self.run_config.model_dump(mode="json"),
-                    "pause_after_evidence": self.pause_after_evidence,
+                    "binding_id": self.binding_id,
                 }
             )
         ).hexdigest()
@@ -125,7 +125,7 @@ class ProfileRegistry:
     """固定的可信注册表；HTTP 层不导入或构造适配器。"""
 
     def __init__(self, profiles: Sequence[ExecutionProfile] | None = None):
-        entries = default_profiles() if profiles is None else list(profiles)
+        entries = [] if profiles is None else list(profiles)
         self.entries = {}
         for profile in entries:
             identity = profile.metadata.profile_id
@@ -142,14 +142,26 @@ class ProfileRegistry:
         except (KeyError, TypeError):
             raise WebError("profile_not_found", "未找到该执行配置。", 404) from None
 
-    def runnable(self, identity):
+    def runnable(self, identity=None):
+        """仅在配置唯一时省略身份；空配置或歧义必须明确拒绝。"""
+        if identity is None:
+            if not self.entries:
+                raise WebError(
+                    "profiles_unconfigured", "尚未配置执行模块。请配置服务端执行模块后重新启动。"
+                )
+            if len(self.entries) != 1:
+                raise WebError("profile_required", "请选择一个执行配置后提交任务。", 422)
+            identity = next(iter(self.entries))
         profile = self.get(identity)
         if not profile.public()["ready"]:
             raise WebError("profile_unavailable", profile.public()["unavailable_reason"])
         return profile
 
     def for_record(self, record):
-        identity = record.get("profile_id") or f"demo-{record['scenario']}"
+        # 恢复必须使用运行保存的明确身份，不能按当前默认配置猜测旧连接。
+        identity = record.get("profile_id")
+        if identity is None:
+            raise WebError("profile_unavailable", "原运行未保存执行配置身份，不能继续恢复。")
         try:
             profile = self.runnable(identity)
         except WebError as error:
@@ -161,52 +173,3 @@ class ProfileRegistry:
         if record.get("profile_signature") not in {None, profile.signature()}:
             raise WebError("profile_changed", "执行配置或已注册数据目录已改变，不能继续原运行。")
         return profile
-
-
-def default_profiles():
-    """显式保留项目配置入口，并让示例可在无网络环境下运行。"""
-    pending = ModuleState(status="unavailable", label="尚未接入")
-    profiles = [
-        ExecutionProfile(
-            metadata=ProfileMetadata(
-                profile_id="project-default",
-                title="项目数据池",
-                description="连接项目数据处理、规划与检索生成模块后，在此提交实际任务。",
-                kind="project",
-                dataset_id="project-data",
-                dataset_name="项目数据池",
-                revision="unconfigured-v1",
-                modules=ModuleConnections(data=pending, planner=pending, content=pending),
-            ),
-            run_config=m.RunConfig(max_wall_time_ms=600_000, model_id="not-configured"),
-        )
-    ]
-    for scenario in SCENARIOS:
-        identity = scenario["id"]
-
-        @asynccontextmanager
-        async def factory(selected=identity):
-            data, content, planner = demo_ports(selected)
-            yield ExecutionPorts(data=data, content=content, planner=planner)
-
-        data, _, _ = demo_ports(identity)
-        fixture = ModuleState(status="fixture", label="本地合成示例")
-        profiles.append(
-            ExecutionProfile(
-                metadata=ProfileMetadata(
-                    profile_id=f"demo-{identity}",
-                    title=f"示例 · {scenario['title']}",
-                    description=scenario["description"],
-                    kind="demo",
-                    dataset_id="synthetic-revenue",
-                    dataset_name="合成营收资料",
-                    revision="synthetic-v1",
-                    modules=ModuleConnections(data=fixture, planner=fixture, content=fixture),
-                    suggested_questions=[scenario["question"]],
-                ),
-                sources=tuple(data.sources),
-                ports_factory=factory,
-                pause_after_evidence=identity == "recovery",
-            )
-        )
-    return profiles

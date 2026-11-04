@@ -1,11 +1,12 @@
-"""通过隔离安装与真实本地 HTTP，验证可选网页组件的 wheel 包。
+"""隔离安装当前 wheel，验证包内容、配置解析与命令行入口。
 
-先运行 ``uv build``，再从任意工作目录执行本脚本。
-默认安装仅使用缓存依赖；缓存不足时，``--allow-downloads`` 允许下载依赖。
-脚本不使用模型端点或凭据。复制后的探测程序在源码检出目录外的隔离 Python 中执行，
-启动已安装的命令行入口，检查全部三个合成场景，并重启服务器。
-无论验证成功与否，都会先移除临时环境、服务器和合成数据，
-再写入 JSON 验证证据报告。
+先运行 ``uv build``，再从任意工作目录执行本脚本。默认仅使用 uv 缓存安装依赖；
+``--allow-downloads`` 显式允许下载公开依赖。探测程序复制到源码目录之外，
+通过安装环境中的 ``python -I`` 检查真实发布包，不借用本地源码或测试替身。
+
+验证只解析临时配置、读取静态资源并检查命令行帮助和错误，不启动应用服务器、
+进入应用生命周期、打开套接字或请求模型。临时配置仅包含测试专用凭据。
+临时安装环境清理后写入 JSON 报告；本脚本不验证真实模块或回答质量。
 """
 
 from __future__ import annotations
@@ -13,26 +14,21 @@ from __future__ import annotations
 import argparse
 import configparser
 import hashlib
-import html
 import json
 import os
 import shutil
-import signal
-import socket
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 import zipfile
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from email import message_from_bytes
 from pathlib import Path
 
 
 def checked_command(args, *, cwd, env=None):
-    """运行有时限的子进程，不转发继承来的 Python 导入路径。"""
+    """运行有时限的子进程；失败时保留安装和导入诊断。"""
     result = subprocess.run(
         args, cwd=cwd, env=env, text=True, capture_output=True, timeout=90, check=False
     )
@@ -44,19 +40,32 @@ def checked_command(args, *, cwd, env=None):
 
 
 def clean_environment():
-    """保留常规操作系统设置，移除可能混入源码的导入配置。"""
+    """移除可能混入源码的 Python 导入配置，保留 uv 缓存和操作系统设置。"""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
+    env.pop("PYTHONOPTIMIZE", None)
     env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
 def wheel_identity(root, wheel, expected_version):
-    """检查安装元数据，并逐字节比较打包的源码与静态资源。"""
+    """检查发行元数据、完整源码及静态资源，并拒绝演示或测试包。"""
+    assets = {
+        "lake_agent/web/static/index.html",
+        "lake_agent/web/static/app.js",
+        "lake_agent/web/static/styles.css",
+    }
+    sources = {
+        path.relative_to(root / "src").as_posix()
+        for path in (root / "src" / "lake_agent").rglob("*.py")
+    }
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        assert len(names) == len(set(names)), "Wheel contains duplicate file paths"
+        metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
+        assert len(metadata_names) == 1, "Wheel must contain exactly one distribution"
+        metadata_name = metadata_names[0]
         metadata = message_from_bytes(archive.read(metadata_name))
         assert metadata["Name"] == "lake-agent-runtime"
         assert metadata["Version"] == expected_version
@@ -71,18 +80,28 @@ def wheel_identity(root, wheel, expected_version):
         entrypoints = configparser.ConfigParser()
         entrypoint_name = metadata_name.rsplit("/", 1)[0] + "/entry_points.txt"
         entrypoints.read_string(archive.read(entrypoint_name).decode())
-        assert entrypoints["console_scripts"]["lake-agent-web"] == "lake_agent.web.app:main"
-        assert entrypoints["console_scripts"]["lake-agent-demo"] == "lake_agent.demo:main"
-        assets = {
-            "lake_agent/web/static/index.html",
-            "lake_agent/web/static/app.js",
-            "lake_agent/web/static/styles.css",
+        assert dict(entrypoints["console_scripts"]) == {
+            "lake-agent-web": "lake_agent.web.app:main"
+        }, "Only the configured web entry point may be shipped"
+        forbidden = [
+            name
+            for name in names
+            if Path(name).name in {"demo.py", "fixtures.py"}
+            or any(
+                part in {"test", "tests", "testing", "demo", "fixtures", "__pycache__"}
+                for part in Path(name).parts
+            )
+            or Path(name).name.startswith("test_")
+        ]
+        assert not forbidden, f"Development-only files were packaged: {forbidden}"
+        packaged_sources = {
+            name for name in names if name.startswith("lake_agent/") and name.endswith(".py")
         }
+        assert packaged_sources == sources, "Packaged Python modules differ from the checkout"
         assert assets <= set(names), f"Missing packaged assets: {assets - set(names)}"
         hashes = {
             name: hashlib.sha256(archive.read(name)).hexdigest()
-            for name in sorted(names)
-            if name.startswith("lake_agent/") and (name.endswith(".py") or name in assets)
+            for name in sorted(sources | assets)
         }
     for name, digest in hashes.items():
         assert hashlib.sha256((root / "src" / name).read_bytes()).hexdigest() == digest, name
@@ -96,270 +115,143 @@ def wheel_identity(root, wheel, expected_version):
         "static_files": sorted(assets),
         "packaged_source_and_static_sha256": hashes,
         "packaged_files_match_checkout": True,
+        "development_only_packages_absent": True,
     }
 
 
 def probe_installed(expected_version):
-    """在独立且隔离的解释器中检验已安装的软件包。"""
-    import asyncio
-    from importlib import metadata
+    """在隔离解释器中读取已安装包；不构造实际数据端口或模型客户端。"""
+    import io
+    from contextlib import redirect_stderr
+    from importlib import metadata, util
+    from unittest.mock import patch
 
-    import httpx
+    import uvicorn
 
     import lake_agent
-    from lake_agent.demo import DemoContent, DemoData, DemoPlanner
-    from lake_agent.models import RunRequest
-    from lake_agent.runtime import _Controller
-    from lake_agent.trace import JsonlTraceSink
-    from lake_agent.workflow import build_workflow
+    from lake_agent.adapters.planner import JsonPlanner
+    from lake_agent.config import ConfigError, load_config
+    from lake_agent.engine.graph_runner import build_workflow
+    from lake_agent.engine.recovery import _implementation_digest
+    from lake_agent.evaluation.models import EvaluationRow
+    from lake_agent.runtime import resume, run
+    from lake_agent.web.app import main as web_main
 
     work = Path.cwd().resolve()
     package = Path(lake_agent.__file__).resolve()
+    assert sys.flags.isolated, "The installed probe requires python -I"
     assert package.is_relative_to(Path(sys.prefix).resolve()), package
-    assert lake_agent.__version__ == expected_version
+    assert lake_agent.__version__ == metadata.version("lake-agent-runtime") == expected_version
+    # 子包必须进入 wheel，公共执行入口继续可导入；这里只检查对象，不执行任务。
+    assert JsonPlanner.agent_protocol == "agent-loop-v1"
+    assert all(callable(item) for item in (run, resume, build_workflow, _implementation_digest))
+    assert EvaluationRow(mode="fixed_retrieval", task_count=1).mode == "fixed_retrieval"
+    for name in ("lake_agent.demo", "lake_agent.web.fixtures", "lake_agent.tests"):
+        assert util.find_spec(name) is None, f"Development-only module is installed: {name}"
+    entrypoints = {
+        item.name: item.value
+        for item in metadata.distribution("lake-agent-runtime").entry_points
+        if item.group == "console_scripts"
+    }
+    assert entrypoints == {"lake-agent-web": "lake_agent.web.app:main"}, entrypoints
     cli = Path(sys.executable).with_name("lake-agent-web")
     assert cli.is_file(), cli
-    # 只短暂占用套接字以选出空闲本地端口。监听套接字由服务器自身持有，
-    # 离开上下文时始终会终止服务器。
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    data_dir = work / "data"
-    log_path = work / "server.log"
-    exits = []
+    help_text = checked_command([str(cli), "--help"], cwd=work, env=clean_environment())
+    assert "--config" in help_text and "--port" in help_text and "--data-dir" in help_text
 
-    @contextmanager
-    def server():
-        with log_path.open("a") as log:
-            child = subprocess.Popen(
-                [str(cli), "--port", str(port), "--data-dir", str(data_dir)],
-                cwd=work,
-                env=clean_environment(),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-            try:
-                with httpx.Client(
-                    base_url=f"http://127.0.0.1:{port}", timeout=3, trust_env=False
-                ) as client:
-                    deadline = time.monotonic() + 15
-                    while True:
-                        if child.poll() is not None:
-                            raise RuntimeError(log_path.read_text())
-                        try:
-                            response = client.get("/api/info")
-                            response.raise_for_status()
-                            break
-                        except httpx.TransportError:
-                            if time.monotonic() >= deadline:
-                                raise TimeoutError("Installed CLI did not start") from None
-                            time.sleep(0.02)
-                    yield client
-            finally:
-                if child.poll() is None:
-                    child.terminate()
-                try:
-                    child.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=5)
-                    raise RuntimeError("Installed CLI did not drain on shutdown") from None
-                exits.append(child.returncode)
+    # 未安装的工厂名称证明这里只做配置解析，不会为了加载配置导入团队模块。
+    # .invalid 保留域名和专用假凭据不会成为真实模型连接目标。
+    configuration = work / "configuration"
+    configuration.mkdir()
+    config_path = configuration / "settings.toml"
+    config_path.write_text(
+        """[llm]
+base_url = "https://example.invalid/v1"
+api_key = "installed-check-only-credential"
+model_id = "installed-check-model"
 
-    def stopped(client, run_id):
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            response = client.get(f"/api/runs/{run_id}")
-            response.raise_for_status()
-            view = response.json()
-            if not view["active"]:
-                return view
-            time.sleep(0.01)
-        raise TimeoutError(f"Installed run did not settle: {run_id}")
+[server]
+data_dir = "records"
 
-    def create(client, scenario, question):
-        response = client.post(
-            "/api/runs",
-            json={"question": question, "profile_id": f"demo-{scenario}", "mode": "full_agent"},
-        )
-        assert response.status_code == 202, response.text
-        return stopped(client, response.json()["run_id"])
+[profile]
+profile_id = "installed-check"
+title = "Installed configuration check"
+dataset_id = "installed-check-data"
+dataset_name = "Installed configuration check"
+revision = "installed-check-v1"
 
-    def summarize(view):
-        result = view["result"]
-        assert result["usage"]["provider_requests"] == 0, result
-        assert view["metrics"]["model_calls"] == 0, view
-        return {
-            "run_id": view["run_id"],
-            "status": view["status"],
-            "stop_reason": result["stop_reason"],
-            "metrics": view["metrics"],
-            "provider_requests": result["usage"]["provider_requests"],
-            "event_count": len(view["events"]),
-            "evidence_ids": [item["evidence_id"] for item in view["evidence"]],
-        }
+[adapters.data]
+factory = "uninstalled_team_data:create_port"
 
-    # 除了下面的 HTTP 验证，还检查已安装的执行引擎。
-    # 构建图不会触发适配器 I/O，也不会打开审计目录。
-    async def inspect_graph():
-        graph = build_workflow(
-            _Controller(
-                RunRequest(task_id="installed-graph", question="Inspect offline workflow"),
-                DemoData(),
-                DemoContent(),
-                DemoPlanner(),
-                JsonlTraceSink(work / "graph-inspection"),
-            )
-        )
-        nodes = sorted(graph.get_graph().nodes)
-        assert {
-            "catalog",
-            "decompose",
-            "search",
-            "select_tools",
-            "read_observation",
-            "execute_plan",
-            "finish_subtask",
-            "compose",
-            "verify",
-            "feedback",
-            "fixed_search",
-            "fixed_execute",
-        } <= set(nodes), nodes
-        assert graph.checkpointer is None and graph.cache is None
-        return {
-            "engine": "langgraph",
-            "langgraph_version": metadata.version("langgraph"),
-            "langchain_core_version": metadata.version("langchain-core"),
-            "nodes": nodes,
-            "graph_checkpointer": False,
-            "graph_cache": False,
-        }
+[adapters.content]
+factory = "uninstalled_team_content:create_port"
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    assert config.server.data_dir == configuration / "records"
+    assert not config.server.data_dir.exists(), "Configuration loading created runtime storage"
+    assert config.run.model_id == config.llm.model_id == "installed-check-model"
+    assert config.run.model_params == config.llm.model_params
+    assert config.llm.api_key.get_secret_value() == "installed-check-only-credential"
+    assert "installed-check-only-credential" not in config.model_dump_json()
 
-    checks = {"workflow": asyncio.run(inspect_graph())}
-    with server() as client:
-        info = client.get("/api/info").json()
-        assert info["version"] == expected_version and info["demo_only"] is True
-        assert info["application"] == "project-workspace"
-        profiles = client.get("/api/profiles").json()["profiles"]
-        assert len(profiles) == 4
-        assert profiles[0]["profile_id"] == "project-default" and not profiles[0]["ready"]
-        unavailable = client.post(
-            "/api/runs", json={"question": "Unavailable project", "profile_id": "project-default"}
-        )
-        assert unavailable.status_code == 409
-        directory = client.get("/api/profiles/demo-standard/sources").json()
-        assert len(directory["sources"]) == 2
-        checks["profiles"] = {"registered": len(profiles), "project_unavailable": True}
-        template = client.get("/api/evaluations/template").json()
-        assert all(
-            value is None for row in template["results"] for value in row["metrics"].values()
-        )
-        imported = client.post("/api/evaluations", json=template)
-        assert imported.status_code == 201, imported.text
-        imported = imported.json()
-        assert imported["origin"] == "imported"
-        downloaded = client.get(f"/api/evaluations/{imported['evaluation_id']}")
-        assert downloaded.json() == imported
-        assert downloaded.headers.get("content-disposition") == (
-            f'attachment; filename="{imported["evaluation_id"]}.json"'
-        )
-        checks["evaluations"] = {
-            "import_preserves_unknown_metrics": True,
-            "download_attachment": True,
-        }
-        assert {item["id"] for item in info["scenarios"]} == {"standard", "parallel", "recovery"}
-        static = {}
-        for route, filename in (
-            ("/", "index.html"),
-            ("/static/app.js", "app.js"),
-            ("/static/styles.css", "styles.css"),
+    malformed = configuration / "malformed.toml"
+    malformed.write_text("[llm\n", encoding="utf-8")
+    missing = configuration / "missing.toml"
+    rejected = []
+    for name, path in (("missing", missing), ("malformed", malformed)):
+        try:
+            load_config(path)
+        except ConfigError:
+            pass
+        else:
+            raise AssertionError(f"The {name} configuration was accepted")
+        # 直接调用已安装入口函数，并封住服务器启动入口。即使错误路径退化，
+        # 本探测也只会失败，不会意外启动服务器或进入应用生命周期。
+        error_output = io.StringIO()
+        with (
+            patch.object(sys, "argv", [str(cli), "--config", str(path)]),
+            patch.object(uvicorn, "run", side_effect=AssertionError("Server startup is forbidden")),
+            redirect_stderr(error_output),
         ):
-            response = client.get(route)
-            assert response.status_code == 200, response.text
-            installed_asset = package.parent / "web" / "static" / filename
-            assert response.content == installed_asset.read_bytes()
-            static[route] = {
-                "bytes": len(response.content),
-                "content_type": response.headers["content-type"],
-            }
-        checks["info"] = {"version": info["version"], "demo_only": info["demo_only"]}
-        checks["static"] = static
-        question = "<script>alert(1)</script> & What was 2024 annual revenue?"
-        standard = create(client, "standard", question)
-        assert standard["status"] == "completed" and standard["metrics"]["tools"] == 1
-        assert "120 million HKD" in standard["result"]["answer"]["text"]
-        run_path = f"/api/runs/{standard['run_id']}"
-        assert client.get(f"{run_path}/export").json() == standard
-        report = client.get(f"{run_path}/report")
-        assert report.status_code == 200 and html.escape(question) in report.text
-        assert "<script" not in report.text.lower()
-        event = next(
-            item
-            for item in standard["events"]
-            if item["event_type"] == "tool.call.completed" and item["data_ref"]
-        )
-        artifact = client.get(f"{run_path}/artifacts/{event['attempt_id']}/{event['data_ref']}")
-        assert artifact.status_code == 200 and artifact.json()["call_id"] == event["call_id"]
-        checks["standard"] = summarize(standard)
-        checks["downloads"] = {
-            "json_matches_view": True,
-            "html_escaped": True,
-            "artifact_scoped": True,
-        }
-        parallel = create(client, "parallel", "What was 2024 annual revenue?")
-        assert parallel["status"] == "completed" and parallel["metrics"]["tools"] == 2
-        assert {item["source_id"] for item in parallel["evidence"]} == {
-            "demo-annual",
-            "demo-quarter",
-        }
-        checks["parallel"] = summarize(parallel)
-        paused = create(client, "recovery", "What was 2024 annual revenue?")
-        assert paused["status"] == "paused" and paused["can_resume"] is True
-        assert len(paused["evidence"]) == 1
-        response = client.post(f"/api/runs/{paused['run_id']}/resume")
-        assert response.status_code == 202, response.text
-        resumed = stopped(client, paused["run_id"])
-        assert resumed["status"] == "completed" and resumed["evidence"] == paused["evidence"]
-        assert resumed["metrics"]["tools"] == resumed["metrics"]["steps"] == 1
-        assert resumed["metrics"]["attempts"] == 2
-        tool_events = [
-            item for item in resumed["events"] if item["event_type"] == "tool.call.completed"
-        ]
-        assert sum(not item["detail"].get("replayed") for item in tool_events) == 1
-        assert any(item["detail"].get("replayed") for item in tool_events)
-        assert client.post(f"/api/runs/{paused['run_id']}/resume").status_code == 409
-        checks["recovery"] = {
-            **summarize(resumed),
-            "evidence_identity_preserved": True,
-            "tool_redispatches": 0,
-        }
-        saved = {view["run_id"]: view["result"] for view in (standard, parallel, resumed)}
+            try:
+                web_main()
+            except SystemExit as error:
+                assert error.code == 2, error.code
+            else:
+                raise AssertionError(f"The CLI accepted the {name} configuration")
+        assert "error:" in error_output.getvalue()
+        rejected.append(name)
 
-    with server() as client:
-        history = client.get("/api/runs").json()["runs"]
-        assert {item["run_id"] for item in history} == set(saved)
-        for run_id, result in saved.items():
-            view = client.get(f"/api/runs/{run_id}").json()
-            assert view["result"] == result and view["active"] is False
-        checks["restart"] = {"persisted_runs": len(history), "results_unchanged": True}
-        assert client.get(f"/api/evaluations/{imported['evaluation_id']}").json() == imported
-        checks["evaluations"]["persists_after_restart"] = True
-    # 在 POSIX 上，Uvicorn 会在生命周期关闭后重新触发已处理的信号。
-    # 只有两次关闭都实际完成，信号退出才算有效。
-    assert len(exits) == 2 and all(code in {0, -signal.SIGTERM} for code in exits), exits
-    assert log_path.read_text().count("Application shutdown complete.") == 2
+    assets = {}
+    for filename in ("index.html", "app.js", "styles.css"):
+        payload = (package.parent / "web" / "static" / filename).read_bytes()
+        assert payload, filename
+        assets[filename] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
     return {
         "package_path": str(package),
         "python": sys.executable,
         "isolated_python": bool(sys.flags.isolated),
-        "cli_exit_codes": exits,
-        "checks": checks,
+        "checks": {
+            "installed_version": expected_version,
+            "console_scripts": entrypoints,
+            "cli_help": True,
+            "configuration_load": True,
+            "configuration_relative_data_dir": True,
+            "configuration_creates_no_storage": True,
+            "credential_serialization_redacted": True,
+            "rejected_configurations": rejected,
+            "static_files": assets,
+            "development_only_modules_absent": True,
+            "server_started": False,
+            "model_requests": 0,
+        },
     }
 
 
 def main():
-    """关闭全部临时资源后，生成可移植的验证证据报告。"""
+    """从当前项目版本定位 wheel，清理临时环境后写入验证报告。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--report", type=Path)
@@ -368,25 +260,30 @@ def main():
     parser.add_argument("--expected-version", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.probe:
+        if not args.expected_version:
+            parser.error("The isolated probe requires an expected version")
         print(json.dumps(probe_installed(args.expected_version)))
         return
     root = Path(__file__).resolve().parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     version = project["version"]
     wheel = (
         args.wheel or root / "dist" / f"lake_agent_runtime-{version}-py3-none-any.whl"
     ).resolve()
-    report_path = (args.report or root / "docs" / "installed-wheel-web-2026-11-02.json").resolve()
+    report_path = (args.report or root / "runs" / "installed-web-check.json").resolve()
     report = {
         "verified_at": datetime.now(UTC).isoformat(),
-        "verification": "installed optional web wheel; loopback HTTP; synthetic ports; zero model requests",
+        "verification": "isolated installed web wheel; configuration and CLI checks; no server or model requests",
         "runtime_version": version,
+        "dependency_downloads_allowed": args.allow_downloads,
         "status": "running",
     }
+    temporary_root = None
     try:
         report["wheel"] = wheel_identity(root, wheel, version)
         with tempfile.TemporaryDirectory(prefix="comp7608-installed-web-") as directory:
             work = Path(directory).resolve()
+            temporary_root = work
             assert not work.is_relative_to(root), "Installation must be outside the checkout"
             checked_command(["uv", "venv", str(work / "env"), "--python", sys.executable], cwd=work)
             py = work / "env" / "bin" / "python"
@@ -404,9 +301,7 @@ def main():
             )
             report["isolated_install"] = json.loads(result)
             report["outside_checkout"] = True
-        report["temporary_environment_removed"] = not work.exists()
-        # 检测构建后并发发生的源码修改，避免把过期 wheel
-        # 认证为当前源码检出目录对应的发布工件。
+        # 再次校验源码与 wheel，防止并发编辑使刚验证的包与交付源码不一致。
         assert wheel_identity(root, wheel, version) == report["wheel"]
         report["status"] = "passed"
     except Exception as exc:
@@ -414,8 +309,13 @@ def main():
         report["error"] = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        # TemporaryDirectory 会在异常路径上同样清理；报告也保留该结果。
+        if temporary_root is not None:
+            report["temporary_environment_removed"] = not temporary_root.exists()
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(json.dumps({"report": str(report_path), "status": report["status"]}))
 
 

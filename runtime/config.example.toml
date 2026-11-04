@@ -1,0 +1,50 @@
+# 服务端配置样例。复制为 config.toml 后填写真实模型和团队适配器。
+# 本文件不含凭据；config.toml 与 config.*.toml 默认不提交。
+# 配置加载不会进入适配器或请求模型；实际任务执行时才创建客户端。
+
+[llm]
+# API 根地址，代码自动补 /chat/completions；可替换为兼容服务的实际地址。
+base_url = "https://api.example.com/v1"
+model_id = "your-model"
+api_key_env = "MODEL_API_KEY"
+# 如需将密钥放在私有 config.toml 中，可删除 api_key_env，改为 api_key。
+# api_key 和 api_key_env 必须且只能指定一个。
+model_params = { temperature = 0 }
+
+[server]
+port = 8765
+# 相对目录始终相对于这份配置文件的位置，不依赖启动工作目录。
+data_dir = "runs/workspace"
+max_active_runs = 2
+
+[profile]
+profile_id = "project-main"
+title = "项目数据池"
+description = "使用已接入的数据、规划和内容模块执行任务。"
+dataset_id = "project-data"
+dataset_name = "项目数据池"
+revision = "v1"
+
+# 两个工厂必须来自已安装的实际团队模块；这里没有合成数据回退。
+# 签名：factory(*, options: dict, llm: LLMSettings) -> 异步上下文管理器。
+[adapters.data]
+factory = "your_data_module:create_port"
+options = {}
+
+[adapters.content]
+factory = "your_content_module:create_port"
+options = {}
+
+[run]
+max_wall_time_ms = 120000
+per_call_timeout_ms = 20000
+max_model_calls = 12
+# 自主决策轮数也约束不消耗模型额度的本地规划器，避免无限循环。
+max_agent_turns = 32
+# 日常交互默认 false：模型选择是否核验；true：完成前须有当前答案的 supported 核验。
+# Proposal 消融：full_agent 使用 true，no_verifier 使用 false；评估 runner 单独绑定策略。
+require_verification = false
+max_data_calls = 12
+max_plan_steps = 8
+max_parallel_tool_calls = 4
+# 其余 RunConfig 预算字段可在此设置；模型字段只在 [llm] 声明。

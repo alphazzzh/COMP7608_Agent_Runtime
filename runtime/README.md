@@ -1,150 +1,108 @@
 # 异构数据池 Agent Harness
 
-当前包为 **0.7.0**，核心[接口契约](docs/runtime-contract.md)为 **v0.5**，JSON封套版本为 **1.0**。这是面向通用异构数据池的Python 3.11+异步运行控制框架；LakeQA只是评测载体。代码范围与队友接入入口见[仓库README](../README.md)。
+这是 Python 3.11+ 的异步运行控制框架，面向通用异构数据池。运行控制器校验计划、工具、来源和预算，实际数据处理与答案生成由适配器负责。端口契约见 [runtime-contract.md](docs/runtime-contract.md)。
 
-## 安装与启动
+## 按任务阅读
 
-环境要求Python 3.11+与uv。网页与SQLite持久恢复依赖POSIX文件锁，支持macOS/Linux/WSL；原生Windows暂不支持。
+| 目标 | 入口 |
+|---|---|
+| 首次配置或接入队友 A/C 模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
+| 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
+| 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
+| 理解中断后能否继续、哪些调用不会重发 | [持久恢复](docs/durable-recovery.md) |
+| 执行三组受控对照或查看报告边界 | [消融评估](docs/ablation-evaluation.md) |
+| 使用任务历史、来源页和导出报告 | [工作台说明](docs/project-workspace.md) |
 
-如果其他项目曾设置旧版LangChain追踪旗标，启动前执行`unset LANGCHAIN_TRACING LANGCHAIN_HANDLER`；当前Core不支持这两项废弃全局配置。现代V2上下文由图局部隔离，本地审计无需LangSmith服务。
+## 配置与启动
 
-从仓库根目录（包含runtime文件夹）执行：
+产品入口读取服务端 TOML 配置，不携带合成数据、固定回答、固定核验或默认演示配置。
+
+1. 在本目录安装依赖：`uv sync --extra dev --extra web --frozen`。
+2. 将 [config.example.toml](config.example.toml) 复制为私有 `config.toml`，填写真实 API 地址、模型名和密钥来源。
+3. 安装实际数据与内容模块，将 `[adapters.data/content].factory` 改为它们可导入的 `module:function` 工厂，并填写私有 options。
+4. 准备好模块与配置后，手动执行：
 
 ```bash
-cd runtime
-uv sync --extra dev --extra web --frozen
-uv run --extra web --frozen lake-agent-web --data-dir runs/project-workspace
+uv run --extra web --frozen lake-agent-web --config config.toml
 ```
 
-打开 http://127.0.0.1:8765 ，可使用智能问答、数据来源、任务历史和实验评估。默认项目配置尚未接入，选择明确标注的示例即可运行；示例使用合成资料和离线规则，不需要密钥、不发模型请求。服务只监听本机，保持终端运行；`Ctrl+C`关闭。
+打开配置的本机地址，默认 http://127.0.0.1:8765 。`--port`、`--data-dir` 可覆盖配置。配置中的存储路径相对于配置文件解释；显式命令行路径相对于启动目录解释。保持终端运行，`Ctrl+C` 关闭。
 
-每次使用相同的`--data-dir`才能读取同一组历史。下载「任务报告」可获得独立HTML快照，下载「JSON」可获得运行记录。来源页只展示注册目录，评估页只导入已有测量结果，未知指标保持null。页面操作、服务端配置注册、HTTP接口和评估格式集中维护在[项目工作台说明](docs/project-workspace.md)。
+配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出，不回退到测试替身。完整配置、密钥读取、工厂签名与客户端所有权见 [configuration.md](docs/configuration.md)。当前仓库未提供队友的真实 DataPort/ContentPort，实现与凭据必须由实际集成方提供。
 
-不使用网页时，可直接运行三个离线模式：
+队友模块未完成时，可以在源码目录独立测试 B。配置好 `[llm]` 和密钥后，手动运行：
 
 ```bash
-uv run --frozen lake-agent-demo --mode full_agent --output ./runs
-uv run --frozen lake-agent-demo --mode no_verifier --output ./runs
-uv run --frozen lake-agent-demo --mode fixed_retrieval --output ./runs
+uv run --extra web --frozen python -m tests.isolated_runtime --config config.toml --web
 ```
 
-命令打印`RunResult`并写入`runs/<run_id>/events.jsonl`与`artifacts/`。这些结果验证控制流程，不代表真实数据池答案或benchmark质量。
+此入口使用真实控制器；规划、回答生成和核验实际调用配置中的 LLM。数据和本地检索由测试依赖提供，无需填写队友的实际工厂；回答接收当前问题和证据，不再使用固定答案或固定成功核验。合成资料和测试适配器身份明确标注，记录保存于独立目录。命令行单问题方式与检查步骤见 [隔离测试说明](docs/configuration.md#队友模块未完成时独立测试-b)。
 
-## 模块责任与Python入口
+## 模块职责
 
-| 组件 | 负责内容 |
+生产代码按职责归入 `engine/`、`adapters/` 和 `web/`；独立的 `evaluation/` 只定义评估报告格式。实验执行器与合成测试端口保留在 `tests/`，不会打包进生产 wheel。完整目录、文件职责和迁移关系见 [源码目录说明](docs/source-layout.md)。
+
+| 组件 | 职责 |
 |---|---|
 | DataPort | 目录快照、可信工具注册、数据处理与工具调用 |
 | ContentPort | 本地目录准备和检索、答案组合、核验 |
-| PlannerPort | 子任务分解与工具计划 |
-| TraceSink | 请求/响应审计、完整结果artifact |
-| StateStore（可选） | 原请求、调用意图和有效响应的持久记录 |
-| 运行控制器 | 来源授权、校验、预算、超时、重试、调度和证据提交 |
+| AgentPlannerPort | 通过 decide 提出下一动作；配置入口使用真实 JsonPlanner |
+| TraceSink | 请求/响应审计及完整结果工件 |
+| StateStore | 可选持久记录、已知响应与恢复协调 |
+| 运行控制器 | 来源授权、预算、超时、重试、调度和证据提交 |
 
-在应用自己的异步函数中调用：
+三类适配器通过 [ports.py](src/lake_agent/ports.py) 的进程内异步协议连接，不要求分别部署 HTTP 服务。数据和内容工厂以 `factory(*, options: dict, llm: LLMSettings)` 返回异步上下文管理器，每次 run/resume 获得独立端口并负责清理。规划器按配置构造，向 `{base_url}/chat/completions` 发送一次异步请求，不自动重试。
 
-```python
-from lake_agent.models import RunRequest
-from lake_agent.runtime import run
-from lake_agent.trace import JsonlTraceSink
+`JsonPlanner` 的 `decide()` 选择下一步行动，不执行工具或替 C 生成答案，只提供这一种模型决策接口。最终回答和核验需要真实 ContentPort；不得将真实规划器配合测试内容的运行描述为完整 Agent 已联调。模型名、采样参数只在 `[llm]` 声明，`[run]` 复用 [RunConfig](src/lake_agent/models.py) 的预算字段。
 
-request = RunRequest(task_id="task-001", question="比较不同来源的年度营收并给出依据。")
-result = await run(
-    request,
-    data=data_adapter,
-    content=content_adapter,
-    planner=planner_adapter,
-    trace=JsonlTraceSink("runs"),
-)
-```
+## 执行、恢复与工作台
 
-端口协议见[ports.py](src/lake_agent/ports.py)，严格共享模型见[models.py](src/lake_agent/models.py)。应用负责端口客户端与事件循环生命周期；并发run需要独立trace、唯一run_id，以及可重入或独立的适配器。
+公开执行入口为 [runtime.py](src/lake_agent/runtime.py) 的 `run/resume`。[engine/graph_runner.py](src/lake_agent/engine/graph_runner.py) 负责共享的图编译、追踪隔离、取消传播和资源收尾，承接原 `workflow.py` 中仍在使用的执行机制；唯一运行图由 [engine/agent_workflow.py](src/lake_agent/engine/agent_workflow.py) 实现 `decide → action → decide` 循环。模型可选择搜索、工具、观察读取、目录分页、可选计划、生成、核验或结束，不强制分解或检索。控制器负责授权、预算和结果接纳。旧子任务图、两阶段规划 API 和自动协议回退已经删除。图层不额外启用重试、缓存或第二套 checkpointer，恢复以 SQLite 已验证的调用日志为准。
 
-## LangGraph流程编排
+`[run].max_agent_turns` 默认 32，约束自主决策轮数；`require_verification` 默认 false，允许未核验完成，由模型选择是否核验。设为 true 时，必须存在适用于当前完整答案、证据列表和运行政策的 supported 核验。`finish` 是模型的完成提议，由控制器按当前政策接受；`full_agent` 名称本身不启用强制核验。空证据允许生成目录说明、澄清或资料不足说明，不允许伪造引用。`completed`、内部核验通过、外部评测正确是不同概念，均不能互相替代。已实现有界规划上下文、已知观察分页、可信工具安全并行、有界重试和重新规划。工具结果与可引用证据分离；只有通过结构和来源检查的记录可作为答案引用。详细限制见 [接口契约](docs/runtime-contract.md) 与 [工作流说明](docs/langgraph-workflow.md)。
 
-`workflow.py`使用LangGraph StateGraph组织目录、任务分解、子任务检索/工具循环、答案与核验反馈。`run/resume`和队友端口不变，原控制器继续负责授权、预算、调用与证据。没有额外图重试、缓存或图checkpointer；SQLite调用日志仍是恢复依据，取消时先等待图节点退出。节点和迁移边界见[LangGraph流程说明](docs/langgraph-workflow.md)。
+复杂任务的提示鼓励模型将可选 DAG 计划作为工作记忆，随进展更新完成项；结构未知时先检查目录、schema 或观察分页，再构造过滤与聚合。核验失败后依据 issues/recommendation 定向补证或修改答案，动作顺序仍由模型选择。
 
-## 已实现的控制能力
+核验绑定完整可信输入的确定性指纹：接纳不同答案时清除旧核验收据，状态为 missing；答案未变而证据变化时，旧收据为 stale。只调用工具但未改变验收相关状态不会自动要求再核验。过期只表示旧意见不再适用于当前状态，不表示当前答案已被证明错误。`compose` 的可选 `revision` 向无状态内容模块提供旧答案、相关核验及其新鲜度和修改要求，规划器可通过 `revision_instructions` 指定目标；这些信息进入模型消息，不能改变权限、预算或验收政策。外部真实 C 模块需要升级共享模型并实现该字段，仓库只修改了自身隔离适配器。
 
-- 工具结果与可引用证据分开。完整结果保留于artifact，有界观察用于下轮规划；ReadObservationDecision只读取本run已知观察的JSON Pointer分页，不访问任意文件或URL。
-- 规划上下文四字段默认上限24000 UTF-8字节，单字段预览目标2000字节，观察读取最多8次，相同工具动作默认最多接受2次。完整JsonPlanner请求另有256000字节上限；这些都不是模型token保证。
-- 可信工具显式声明parallel_safe，且来源、互斥资源和依赖均无冲突时才允许并行。默认工具并发上限4，范围1–32；旧工具未声明时保持串行。控制器串行准备和结算，子任务规划与内容调用保持顺序。
-- 可修正工具错误支持有界重新规划；重试仍受幂等声明、真实用量和原期限约束。适配器不得通过SDK隐式重试或后台请求绕过控制器。
+生成或核验出现非法引用、目录来源越界或模型正文 JSON/schema 错误时，显式声明 `content_feedback_protocol="content-feedback-v1"` 的内容端口可进入自主修正：控制器拒绝当前输出、保存有界诊断，规划器决定下一步；再次调用内容端口时，扩展请求把具体反馈送到模型 `messages`。原问题、证据和 HTTP 顶层参数不混入错误信息，每次调用仍最多请求一次模型。未声明能力的内容端口不接收 feedback 扩展并保留原失败语义，但参与答案修订仍需支持基础请求中的可选 revision；鉴权/传输/契约错误保持停止。无需增加 TOML 配置，协议和恢复边界见[内容错误诊断与修正](docs/content-feedback.md)。
 
-完整字段、错误码、观察/步骤状态、并行规则及审计格式以[核心契约](docs/runtime-contract.md)为准。
+日常交互的 `require_verification=false` 允许模型选择核验；Proposal 消融中的 `full_agent` 必须使用 `require_verification=true`，`no_verifier` 使用 false 并禁止核验动作。固定 top-k 一次生成基线仅由 `tests/support/ablation.py` 执行；评估报告仍可比较三组结果，任务标注、指标和执行命令见 [消融评估说明](docs/ablation-evaluation.md)。
 
-## 接入真实规划模型
+| 阅读入口 | 内容 |
+|---|---|
+| [ports.py](src/lake_agent/ports.py) / [models.py](src/lake_agent/models.py) | 队友接口、动作和运行配置 |
+| [engine/agent_workflow.py](src/lake_agent/engine/agent_workflow.py) | 模型动作与图路由 |
+| [engine/graph_runner.py](src/lake_agent/engine/graph_runner.py) | 图执行、取消及追踪隔离 |
+| [runtime.py](src/lake_agent/runtime.py) / [engine/tool_runtime.py](src/lake_agent/engine/tool_runtime.py) | 授权、预算与工具执行 |
+| [engine/recovery.py](src/lake_agent/engine/recovery.py) | 持久恢复与已知响应重放 |
+| [engine/content_feedback.py](src/lake_agent/engine/content_feedback.py) | 有界输出诊断、引用差异与内容反馈能力识别 |
+| [adapters/planner.py](src/lake_agent/adapters/planner.py) | 真实模型请求、策略提示与动作解析 |
+| [evaluation/models.py](src/lake_agent/evaluation/models.py) | 三组评估报告格式；不执行基线 |
 
-内置 `JsonPlanner` 通过一次异步 OpenAI-compatible Chat Completions HTTPS 请求产生子任务或工具计划；它不执行工具、不生成最终答案、不自动重试。它不是本地部署适配器，也不使用 Responses API：调用方提供 API 根地址和 API key，适配器向 `{base_url}/chat/completions` 发送 `Authorization: Bearer ...` 请求。原生 `httpx` 已包含在运行时依赖中，不需要安装 provider SDK。
+正式工作台支持完整 Agent 提问、来源目录、历史、真正删除任务及 JSON/HTML 报告。关闭核验与评估导入仅由测试宿主显式开启；正式入口默认不构造评估仓库、不创建评估目录。固定检索只在测试评估脚本中作为基线，不是应用运行模式。浏览器不接收凭据、模块导入路径或预算覆盖；配置与工厂留在服务端。来源页只展示注册目录，不等于读取了数据池全文；测试评估页只显示导入的实际结果，未知指标保持 null。页面和 HTTP 接口见 [工作台说明](docs/project-workspace.md)。
 
-先在当前 shell 中设置连接信息；API key 不要写入仓库、LaTeX 文档或运行配置文件：
+失败结果可携带 `failure.phase/call_id/error`，页面展开具体字段差异、允许的证据 ID 和被拒输出预览；旧历史从已有失败事件回退展示，不补造未保存内容。修正成功后清除当前错误，历史事件保留；未解决内容反馈不能直接 finish，强制核验要求当前有效的 supported 核验。
 
-```bash
-export MODEL_API_BASE_URL="https://api.openai.com/v1"
-export MODEL_API_KEY="your-api-key"
-export MODEL_ID="gpt-4o-mini"
-```
+`run(..., state_store=store)` 与 `resume(run_id, ...)` 保留原请求、期限和累计预算。历史已知响应不重新派发；started 但没有有效 completed 响应的调用结果未知，会拒绝自动恢复。连接配置变化也会阻止旧任务恢复。详见 [恢复说明](docs/durable-recovery.md)。
 
-OpenAI-compatible 的其他服务只需替换地址和模型名，例如 DeepSeek：
-
-```bash
-export MODEL_API_BASE_URL="https://api.deepseek.com/v1"
-export MODEL_ID="deepseek-chat"
-```
-
-如果使用中转站，将 `MODEL_API_BASE_URL` 设置为中转站公开的 API 根地址（例如 `https://proxy.example/v1`），并使用该服务签发的 key。地址必须是绝对 HTTP(S) URL，不能内嵌用户名、密码、query 或 fragment；`JsonPlanner` 会自动补上 `/chat/completions`。
-
-```python
-import os
-from lake_agent.planner import JsonPlanner
-
-async with JsonPlanner(
-    os.environ["MODEL_API_BASE_URL"],
-    os.environ["MODEL_API_KEY"],
-) as planner:
-    request = request.model_copy(
-        update={
-            "config": request.config.model_copy(
-                update={"model_id": os.environ["MODEL_ID"]}
-            )
-        }
-    )
-    result = await run(
-        request, data=data_adapter, content=content_adapter,
-        planner=planner, trace=JsonlTraceSink("runs"),
-    )
-```
-
-还可将已配置的 `httpx.AsyncClient` 作为 `client=` 注入；注入者负责关闭客户端并禁用 transport 层重试。默认请求启用 JSON object 模式，随后用本地 Pydantic 类型校验完整输出。动态工具参数无法保证适用于各 provider 的 strict JSON Schema 子集，所以当前不宣称 provider 端 strict schema 校验。模型 ID 和允许的采样参数放在 `RunConfig.model_id/model_params`；实际项目中建议在构造 `RunRequest` 时设置，而不是修改共享请求对象。
-
-`JsonPlanner` 只覆盖 `PlannerPort.decompose/select_tools`。当前仓库没有通用的真实 `ContentPort` 实现；`compose`、`verify` 仍需由接入方提供，因此不能把仅替换规划器后的运行描述成真实 full-agent 已联调。离线 `DemoPlanner`/`DemoContent` 完全不调用网络模型。
-
-真实 adapter 需满足 `ports.py` 中的异步 Protocol，并遵循共享模型。所有本地 `ModuleResult` 都应显式回报 `Usage.local()`；若遗漏 usage，运行时会按 fail-closed 规则保留一次 provider 请求，防止低报实际调用。首版不支持累计输入/输出 token 硬预算；配置 `max_input_tokens` 或 `max_output_tokens` 时，运行时会在任何数据/模型 adapter 调用前拒绝启动，因为泛化 adapter 尚未声明精确 tokenizer 和 usage 对账能力。未测 token/cost 保持 `null`。Adapter 的 timeout 是合作式边界；忽略取消的 coroutine 或线程不能被 asyncio 强制终止。
-
-## 持久化与恢复
-
-`run(..., state_store=store)`可启用SQLite持久状态；后续`resume(run_id, ...)`用原请求与已验证响应重建控制器。每次尝试使用fresh端口和独立审计段；应用最终关闭StateStore。普通无状态run继续可用，JSONL本身不提供恢复能力。
-
-恢复要求相同运行时源码/版本和图引擎依赖版本；继续未终结运行还校验可信工具契约，原绝对期限包含停机时间，预算不会重置。历史已知调用不重新派发；存在started但没有有效completed响应的未知调用时，拒绝自动恢复。详细示例、错误码、辅助目录注册与取消语义见[持久恢复接入说明](docs/durable-recovery.md)。
-
-## 验证与实际边界
-
-0.7.0中文docstring整理后的完整离线回归为443项通过（14.60s），构建与源码外全新环境的真实本机HTTP安装验证通过。58份Python文件的非docstring语法树、44个共享模型的schema结构与约束，以及前端非注释文本均与整理前相同；源码说明、schema文档描述和CLI帮助已中文化。源码摘要随注释变化，旧源码下尚未结束的运行需新建任务。0.6.0实际浏览器验收保留，当前前端只改注释。完整范围和历史SIGKILL、真实模型403结论见[验收记录](docs/project-workspace-acceptance-2026-11-02.md)。原始安装JSON与截图只保留在本地；可用下述命令重新生成验收报告。
-
-在本目录复核当前版本：
+## 离线验证
 
 ```bash
 uv run --extra dev --extra web --frozen pytest -q
 uv run --extra dev --extra web --frozen ruff check src tests scripts
 uv run --extra dev --extra web --frozen ruff format --check src tests scripts
-uv run --frozen python -m compileall -q src tests scripts
 node --check src/lake_agent/web/static/app.js
-uv build
-uv run --frozen python scripts/verify_installed_web.py --report runs/installed-web-check.json
+uv build --offline
+uv run --frozen python scripts/verify_installed_web.py --report runs/installed-package-check.json
 ```
 
-安装验证默认只从uv缓存安装依赖，缓存不足时可加`--allow-downloads`下载公开依赖；日常复核报告写入runs，避免覆盖归档证据。默认pytest使用本地fixtures和MockTransport，不发外部模型请求。`verify_installed_recovery.py`是硬编码0.4.0 wheel的历史专项，不用于认证当前0.7.0源码；当前恢复回归包含在上述完整测试及Web安装验收中。
+测试按契约、适配器、执行引擎、恢复、工作台和评估分组；目录职责、共享 fixture 与分组命令见 [测试导航](tests/README.md)。测试替身与共享请求构造器位于 `tests/support/`，不打包到生产 wheel。测试通过内存 HTTP transport 检查真实规划器的 endpoint、Authorization、模型和输出解析，同时覆盖真实控制器、SQLite、审计及配置失败行为；不访问外部模型，不启动监听服务。安装验证也仅检查隔离安装、配置、资源和 CLI，不启动应用。历史的合成场景在线专项和固定旧版本脚本已移除。
 
-真实规划器专项脚本仍位于`scripts/live_controller_acceptance.py`、`live_harness_acceptance.py`和`live_parallel_acceptance.py`，它们会调用外部API。`live_controller_acceptance.py`支持覆盖地址和模型；另两个脚本仍带历史专项服务/模型默认值，应先查看各脚本`--help`与源码；优先读取进程环境MODEL_API_KEY，历史服务也支持本机钥匙串凭据。普通使用和本轮文档整理无需运行这些专项。
+API 凭据是否可用、提供方响应兼容性及真实数据答案质量仍需实际模块联调。历史版本证据保留在 [2026-11-02 验收记录](docs/project-workspace-acceptance-2026-11-02.md)，不作为本次改动的实时验证。
 
-真实DataPort/ContentPort与benchmark尚待联调；只替换JsonPlanner不代表真实完整Agent已集成。当前没有累计token硬预算、动态worker委派、跨版本恢复或外部副作用exactly-once保证。SQLite后端限同一POSIX主机的可信本地文件系统；取消依赖适配器合作，不能强杀阻塞线程或忽略取消的协程。
+## 运行边界
+
+支持 macOS/Linux/WSL，工作台与 SQLite 恢复依赖同一 POSIX 主机的可信本地文件系统。应用只监听回环地址，不提供登录、多用户权限或公网部署。共享适配器必须可重入；每次尝试使用独立 trace。
+
+当前不支持累计 token 硬预算、跨版本恢复、动态 worker 委派或外部副作用 exactly-once。未测量 token/cost 保持 null。超时与取消依赖适配器合作，不能强制终止阻塞线程或忽略取消的协程。完整语义仍以接口契约为准。

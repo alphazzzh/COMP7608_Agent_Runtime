@@ -13,7 +13,10 @@ import fcntl
 import json
 import os
 import re
+import shutil
+import stat
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 
 from .. import models as m
@@ -21,6 +24,85 @@ from ..validation import canonical_json
 
 _COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 _RUN = re.compile(r"run-[0-9a-f]{32}\Z")
+
+
+def _failure_preview(value):
+    """生成有界展示副本，不改变原始审计或把全部模型输出塞进任务顶栏。
+
+    JSONL 与清单已有文件大小限制；这里额外限制节点、深度和文本总量，
+    防止一份合法但很大的诊断在每次轮询时重复占用页面和响应空间。
+    """
+    remaining = {"nodes": 128, "characters": 12_000}
+
+    def preview(item, depth=0):
+        if remaining["nodes"] <= 0 or remaining["characters"] <= 0 or depth > 5:
+            return "…（展示已截断，完整内容见原始记录）"
+        remaining["nodes"] -= 1
+        if isinstance(item, str):
+            limit = min(4000, remaining["characters"])
+            remaining["characters"] -= min(len(item), limit)
+            return item[:limit] + ("…" if len(item) > limit else "")
+        if isinstance(item, list):
+            values = [preview(entry, depth + 1) for entry in item[:16]]
+            if len(item) > 16:
+                values.append(f"…另有 {len(item) - 16} 项，见原始记录")
+            return values
+        if isinstance(item, dict):
+            return {
+                str(key)[:100]: preview(entry, depth + 1) for key, entry in islice(item.items(), 16)
+            }
+        return item
+
+    return preview(value)
+
+
+def _display_failure(record, events):
+    """从已提交事件重建展示反馈；成功终态不再发布历史失败为当前错误。
+
+    新控制器显式记录 rejected/resolved，拒绝与成功的原始调用事件仍保留。
+    旧历史没有反馈事件时，以同阶段调用成功作为清除条件。展示层不裁定
+    核心能否恢复、是否接受答案，也不向恢复日志写入派生状态。
+    """
+    result = record.get("result") or {}
+    if result.get("status", record.get("status")) == "completed":
+        return None
+    pending = {}
+    for index, event in enumerate(events):
+        kind, error = event["event_type"], event.get("error")
+        phase = event["detail"].get("phase")
+        if kind == "content.feedback.resolved":
+            pending.pop(phase, None)
+        elif kind == "content.output.rejected" and error:
+            pending[phase] = (event, True, index)
+        elif kind.endswith(".call.failed") and error:
+            pending[kind.removesuffix(".call.failed")] = (event, False, index)
+        elif kind.endswith(".call.completed"):
+            phase = kind.removesuffix(".call.completed")
+            if phase in pending and not pending[phase][1]:
+                pending.pop(phase)
+    saved = result.get("failure")
+    if isinstance(saved, dict):
+        failure = {key: saved.get(key) for key in ("phase", "call_id", "error")}
+        linked = next(
+            (event for event in reversed(events) if event.get("call_id") == failure["call_id"]),
+            None,
+        )
+    elif pending:
+        linked = max(pending.values(), key=lambda value: value[2])[0]
+        failure = {
+            "phase": linked["detail"].get("phase")
+            if linked["event_type"] == "content.output.rejected"
+            else linked["event_type"].removesuffix(".call.failed"),
+            "call_id": linked.get("call_id"),
+            "error": linked["error"],
+        }
+    else:
+        return None
+    # 先裁剪模型诊断，再附关联身份；大诊断不能挤掉定位原始调用所需的字段。
+    failure = _failure_preview(failure)
+    if linked:
+        failure.update(attempt_id=linked["attempt_id"], event_seq=linked["seq"])
+    return failure
 
 
 class WebError(Exception):
@@ -61,6 +143,7 @@ class Repository:
         self.root = Path(root).expanduser().resolve()
         self.manifests = self.root / "metadata"
         self.traces = self.root / "traces"
+        self.deletions = self.root / ".deletions"
         self.descriptor = None
 
     def _inside(self, path, parent):
@@ -85,10 +168,13 @@ class Repository:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BaseException:
             os.close(fd)
-            raise WebError("directory_busy", "该演示目录已由另一个服务使用。") from None
+            raise WebError("directory_busy", "该工作区目录已由另一个服务使用。") from None
         self.descriptor = fd
         self.manifests.mkdir(mode=0o700, exist_ok=True)
         self.traces.mkdir(mode=0o700, exist_ok=True)
+        self.deletions.mkdir(mode=0o700, exist_ok=True)
+        # 删除标记的父目录也必须持久化，避免突然断电后只保留 SQLite 删除。
+        self._sync_directory(self.root)
 
     async def close(self):
         await disk(self._close)
@@ -125,6 +211,8 @@ class Repository:
         return await disk(self._load, run_id)
 
     def _load(self, run_id):
+        if self._deleting(run_id):
+            raise WebError("not_found", "未找到该运行。", 404)
         path = self._manifest(run_id)
         try:
             if path.stat().st_size > 512_000:
@@ -143,8 +231,118 @@ class Repository:
         return await disk(self._listing, limit)
 
     def _listing(self, limit):
-        records = [self._load(path.stem) for path in self.manifests.glob("run-*.json")]
+        records = []
+        for path in self.manifests.glob("run-*.json"):
+            try:
+                records.append(self._load(path.stem))
+            except WebError as error:
+                if error.code != "not_found":
+                    raise
+                # 删除意图立即隐藏记录；并发列表读取也不能重新发布它。
         return sorted(records, key=lambda value: value["created_at"], reverse=True)[:limit]
+
+    @staticmethod
+    def _real_path(path, *, directory):
+        """删除只使用真实目录和普通文件，绝不解析符号链接到其他目标。"""
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+            raise WebError("delete_failed", "任务路径未通过删除校验，未删除外部文件。", 503)
+        return True
+
+    @staticmethod
+    def _sync_directory(path):
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _delete_marker(self, run_id):
+        if not isinstance(run_id, str) or not _RUN.fullmatch(run_id):
+            raise WebError("not_found", "未找到该运行。", 404)
+        return self.deletions / f"{run_id}.delete"
+
+    def _deleting(self, run_id):
+        marker = self._delete_marker(run_id)
+        if not self._real_path(self.deletions, directory=True):
+            return False
+        return self._real_path(marker, directory=False)
+
+    async def deleting(self, run_id):
+        return await disk(self._deleting, run_id)
+
+    async def pending_deletions(self):
+        """重启后先完成已提交删除意图，再开放历史与恢复入口。"""
+        return await disk(self._pending_deletions)
+
+    def _pending_deletions(self):
+        if not self._real_path(self.deletions, directory=True):
+            return []
+        return [
+            path.stem for path in self.deletions.glob("run-*.delete") if self._deleting(path.stem)
+        ]
+
+    def _deletion_paths(self, run_id):
+        self._delete_marker(run_id)
+        for directory in (self.root, self.manifests, self.traces, self.deletions):
+            if not self._real_path(directory, directory=True):
+                raise WebError("delete_failed", "任务存储目录不可用，删除尚未完成。", 503)
+        manifest = self.manifests / f"{run_id}.json"
+        temporary = manifest.with_suffix(".tmp")
+        traces = self.traces / run_id
+        self._real_path(manifest, directory=False)
+        self._real_path(temporary, directory=False)
+        self._real_path(traces, directory=True)
+        return manifest, temporary, traces
+
+    async def prepare_delete(self, run_id):
+        """落盘零字节删除标记；其文件名即唯一待删除身份，不包含用户数据。"""
+        return await disk(self._prepare_delete, run_id)
+
+    def _prepare_delete(self, run_id):
+        self._deletion_paths(run_id)
+        if self._deleting(run_id):
+            return False
+        self._load(run_id)
+        marker = self._delete_marker(run_id)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags, 0o600)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._sync_directory(self.deletions)
+        return True
+
+    async def cancel_delete(self, run_id):
+        """仅在 SQLite 明确拒绝活动租约且尚未删除任何数据时撤销新意图。"""
+        await disk(self._cancel_delete, run_id)
+
+    def _cancel_delete(self, run_id):
+        if self._deleting(run_id):
+            self._delete_marker(run_id).unlink()
+            self._sync_directory(self.deletions)
+
+    async def finish_delete(self, run_id):
+        """SQLite 已提交后清理任务文件；失败保留标记，允许重启或重试完成。"""
+        await disk(self._finish_delete, run_id)
+
+    def _finish_delete(self, run_id):
+        if not self._deleting(run_id):
+            raise WebError("delete_failed", "缺少已提交删除意图，未删除任务文件。", 503)
+        manifest, temporary, traces = self._deletion_paths(run_id)
+        if traces.exists():
+            # POSIX 的 fd 版本 rmtree 不跟随树内符号链接，只移除链接本身。
+            shutil.rmtree(traces)
+        manifest.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+        self._sync_directory(self.traces)
+        self._sync_directory(self.manifests)
+        self._delete_marker(run_id).unlink()
+        self._sync_directory(self.deletions)
 
     def _attempts(self, record):
         # 纳入进程突然退出前刚刚预留的分段，即使界面清单回调
@@ -277,4 +475,5 @@ class Repository:
             "evidence": list(evidence.values()),
             "sources": list(sources.values()),
             "metrics": metrics,
+            "failure": _display_failure(record, events),
         }

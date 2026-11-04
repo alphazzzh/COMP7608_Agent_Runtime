@@ -15,7 +15,7 @@ from .. import models as m
 from ..runtime import resume, run
 from ..state import SqliteStateStore, StateStoreError
 from ..trace import JsonlTraceSink
-from .evaluations import EvaluationRepository
+from .evaluation_storage import EvaluationRepository
 from .profiles import ProfileRegistry
 from .storage import Repository, WebError, utc_now
 
@@ -26,7 +26,6 @@ def summary(record):
     """返回公开索引字段；历史卡片不包含内部恢复标志。"""
     names = (
         "run_id",
-        "scenario",
         "question",
         "mode",
         "status",
@@ -54,36 +53,30 @@ def summary(record):
 
 
 class PresentationTrace(JsonlTraceSink):
-    """记录核心实际采用的尝试身份，并可选择在获得证据后停止。"""
+    """记录核心实际采用的尝试身份，不改变运行的执行与取消行为。"""
 
-    def __init__(self, root, on_attempt, *, pause=False):
+    def __init__(self, root, on_attempt):
         super().__init__(root)
         self.on_attempt = on_attempt
-        self.pause = pause
-        self.paused = False
 
     async def create_attempt(self, run_id, attempt_id):
         await super().create_attempt(run_id, attempt_id)
         await self.on_attempt(attempt_id)
 
-    async def append(self, event):
-        await super().append(event)
-        if self.pause and not self.paused and event.event_type == "evidence.added":
-            # 此事件发生前，核心工作任务已提交经校验的响应。
-            # 取消信号经公开运行接口传播；该接口会先关闭轨迹并释放租约，
-            # 随后本服务的任务才结束。
-            self.paused = True
-            raise asyncio.CancelledError
 
-
-class DemoService:
+class RunService:
     """限制活动任务数量，并串行处理准入，不建立待执行任务积压队列。"""
 
-    def __init__(self, data_dir, max_active_runs=2, *, profiles=None):
+    def __init__(self, data_dir, max_active_runs=2, *, profiles=None, enable_evaluations=False):
         if type(max_active_runs) is not int or max_active_runs < 1:
             raise ValueError("max_active_runs must be a positive integer")
+        if type(enable_evaluations) is not bool:
+            raise ValueError("enable_evaluations must be a boolean")
         self.repository = Repository(data_dir)
-        self.evaluations = EvaluationRepository(self.repository.root)
+        # 报告能力由可信宿主显式开启，正式工作区不初始化评估目录。
+        self.evaluations = (
+            EvaluationRepository(self.repository.root) if enable_evaluations else None
+        )
         self.profiles = ProfileRegistry(profiles)
         self.state_store = SqliteStateStore(self.repository.root / "state.sqlite3")
         self.max_active_runs = max_active_runs
@@ -93,7 +86,10 @@ class DemoService:
 
     async def start(self):
         await self.repository.start()
-        await self.evaluations.start()
+        for run_id in await self.repository.pending_deletions():
+            await self._delete_owned(run_id)
+        if self.evaluations is not None:
+            await self.evaluations.start()
         # 已退出的进程不可能留下活动的 asyncio 任务。此处只核对并修正
         # 展示状态，不自动恢复任何核心运行。
         for record in await self.repository.listing(limit=None):
@@ -115,7 +111,7 @@ class DemoService:
     def _spawn(self, record, *, recovering):
         run_id = record["run_id"]
         task = asyncio.create_task(
-            self._execute(record, recovering=recovering), name=f"web-demo:{run_id}"
+            self._execute(record, recovering=recovering), name=f"web-run:{run_id}"
         )
         self.tasks[run_id] = task
 
@@ -125,7 +121,7 @@ class DemoService:
             if not done.cancelled():
                 error = done.exception()
                 if error is not None:
-                    _LOG.error("Demo job could not settle: %s", type(error).__name__)
+                    _LOG.error("Workspace job could not settle: %s", type(error).__name__)
 
         task.add_done_callback(observed)
 
@@ -141,18 +137,15 @@ class DemoService:
             raise
         self._spawn(record, recovering=recovering)
 
-    async def create(self, question, scenario, mode, *, profile_id=None):
+    async def create(self, question, mode="full_agent", *, profile_id=None):
+        """按已注册配置准入新任务，不构造默认端口或推测配置身份。"""
         async with self.lock:
             self._admit()
-            profile = self.profiles.runnable(profile_id or f"demo-{scenario or 'standard'}")
-            legacy_scenario = profile.metadata.profile_id.removeprefix("demo-")
-            if scenario is None and legacy_scenario in {"standard", "parallel", "recovery"}:
-                scenario = legacy_scenario
+            profile = self.profiles.runnable(profile_id)
             now = utc_now()
             record = {
                 "run_id": f"run-{uuid4().hex}",
                 "question": question,
-                "scenario": scenario,
                 "profile_id": profile.metadata.profile_id,
                 "profile": profile.public(),
                 "profile_signature": profile.signature(),
@@ -173,12 +166,12 @@ class DemoService:
             record = await self.repository.load(run_id)
             if self.active(run_id):
                 raise WebError("already_running", "该任务仍在运行。")
-            if record["result"] is not None or record["status"] not in {"paused", "interrupted"}:
+            if record["result"] is not None or record["status"] != "interrupted":
                 raise WebError("not_resumable", "该运行当前不支持继续恢复。")
             if not record.get("has_state"):
                 raise WebError("not_resumable", "该运行尚未建立可恢复状态。")
             if len(record["attempts"]) >= 20:
-                raise WebError("attempt_limit", "该演示已达到执行尝试上限。", 429)
+                raise WebError("attempt_limit", "该运行已达到执行尝试上限。", 429)
             self.profiles.for_record(record)
             self._admit()
             record.update(status="queued", error=None, updated_at=utc_now())
@@ -210,7 +203,6 @@ class DemoService:
         )
         try:
             profile = self.profiles.for_record(record)
-            sink.pause = profile.pause_after_evidence and not recovering
             record.update(status="running", updated_at=utc_now())
             await self.repository.save(record)
             # 上下文持有本次尝试的全部适配器资源。浏览器请求和共享任务管理器
@@ -228,7 +220,8 @@ class DemoService:
                 else:
                     request = m.RunRequest(
                         run_id=run_id,
-                        task_id=f"web:{profile.metadata.dataset_id}",
+                        # 每次提问拥有独立审计身份；恢复分支继续使用持久化原请求。
+                        task_id=f"web:{run_id}",
                         question=record["question"],
                         mode=record["mode"],
                         config=profile.run_config.model_copy(deep=True),
@@ -266,7 +259,7 @@ class DemoService:
                     "message": "运行状态已保存；执行模块的资源清理被中断。",
                 }
             else:
-                record.update(status="paused" if sink.paused else "interrupted")
+                record.update(status="interrupted")
                 record["has_state"] = await self._has_state(run_id)
         except Exception as error:
             if core_settled:
@@ -303,6 +296,7 @@ class DemoService:
             "recovery_outcome_unknown": "存在结果未确认的调用，已停止自动恢复，避免重复执行。",
             "recovery_deadline_expired": "原运行期限已到；恢复不会重置时间预算。",
             "recovery_version_mismatch": "运行时版本或源码已改变，不能恢复旧版本运行。",
+            "recovery_engine_mismatch": "规划器执行协议已改变，不能继续原运行。",
             "recovery_contract_mismatch": "数据工具契约已改变，不能继续原运行。",
         }.get(code, "持久状态未通过恢复检查，已停止继续调用。")
 
@@ -316,7 +310,7 @@ class DemoService:
             active = self.active(run_id)
         can_resume = (
             not active
-            and view["status"] in {"paused", "interrupted"}
+            and view["status"] == "interrupted"
             and view.get("has_state", False)
             and len(view["attempts"]) < 20
         )
@@ -338,6 +332,60 @@ class DemoService:
 
     async def listing(self):
         return [summary(record) for record in await self.repository.listing()]
+
+    async def delete(self, run_id):
+        """串行删除已停止的任务；HTTP 取消也须等清理结束后才交还所有权。"""
+        async with self.lock:
+            if self.closing:
+                raise WebError("service_stopping", "服务正在停止。", 503)
+            if not await self.repository.deleting(run_id):
+                await self.repository.load(run_id)
+            if self.active(run_id):
+                raise WebError("run_active", "任务仍在运行，请先停止任务再删除。")
+            job = asyncio.create_task(self._delete_owned(run_id))
+            cancelled = False
+            while not job.done():
+                try:
+                    await asyncio.shield(job)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            try:
+                job.result()
+            except BaseException:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+            finally:
+                self.tasks.pop(run_id, None)
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _delete_owned(self, run_id):
+        """持久意图 → SQLite 单事务 → 文件清理，任何中断均可安全继续。"""
+        prepared = False
+        try:
+            prepared = await self.repository.prepare_delete(run_id)
+            await self.state_store.delete(run_id)
+            await self.repository.finish_delete(run_id)
+        except StateStoreError as error:
+            if error.code == "lease_conflict":
+                if prepared:
+                    try:
+                        await self.repository.cancel_delete(run_id)
+                    except OSError:
+                        raise WebError(
+                            "delete_failed", "删除意图尚未撤销，请重试或重启服务继续清理。", 503
+                        ) from None
+                raise WebError("run_active", "任务存在活动执行租约，请先停止任务再删除。") from None
+            raise WebError(
+                "delete_failed", "删除尚未完成；可重试删除或重启服务继续清理。", 503
+            ) from None
+        except OSError:
+            raise WebError(
+                "delete_failed", "删除尚未完成；可重试删除或重启服务继续清理。", 503
+            ) from None
 
     async def cancel(self, run_id):
         async with self.lock:

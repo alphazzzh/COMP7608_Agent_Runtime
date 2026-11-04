@@ -1,6 +1,7 @@
 """可选本地数据池项目工作区的 FastAPI 入口。
 
-HTTP 层校验输入后委托 DemoService 处理。命令行入口仅绑定回环地址。
+HTTP 层校验输入后委托 RunService 处理。命令行从 TOML 加载真实执行配置，
+配置缺失或校验失败时在绑定端口之前退出，且仅绑定回环地址。
 同源写入限制、严格的浏览器策略、固定静态路由和按引用限定的工件读取，
 共同控制此本地展示界面的访问范围。
 """
@@ -8,42 +9,91 @@ HTTP 层校验输入后委托 DemoService 处理。命令行入口仅绑定回�
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, get_args
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import __version__
 from .. import models as m
-from .evaluations import EvaluationImport
-from .fixtures import CAPABILITIES, SCENARIOS
+from ..config import ConfigError, load_config
+from ..evaluation.models import EvaluationImport, EvaluationMode
+from .configuration import configured_profile
 from .reports import html_report
-from .service import DemoService
+from .service import RunService
 from .storage import WebError, utc_now
 
 _STATIC = Path(__file__).with_name("static")
+
+# 只描述内核实际提供的能力；模块连接状态由各执行配置单独返回。
+_CAPABILITIES = [
+    {
+        "name": "受控规划与工具执行",
+        "status": "implemented",
+        "description": "验证模型提出的计划、工具参数、来源授权与依赖，再执行实际适配器。",
+    },
+    {
+        "name": "证据、引用与运行审计",
+        "status": "implemented",
+        "description": "保留实际请求、响应和可引用证据，支持按执行尝试追溯。",
+    },
+    {
+        "name": "预算、取消与安全恢复",
+        "status": "implemented",
+        "description": "统一控制预算与超时；恢复复用已验证的响应，结果未知时拒绝重派发。",
+    },
+]
 
 
 class StartRun(m.Model):
     """只接受展示选项，不接收凭据、代码或外部路径。"""
 
     question: Annotated[str, Field(min_length=1, max_length=2000)]
-    scenario: Literal["standard", "parallel", "recovery"] | None = None
     profile_id: Annotated[str, Field(min_length=1, max_length=100)] | None = None
     mode: m.Mode = "full_agent"
 
 
-def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
-    """使用调用方指定的本地存储创建单一所有者应用。"""
-    service = DemoService(
-        data_dir or Path.cwd() / "runs" / "web-demo", max_active_runs, profiles=profiles
+def create_app(
+    data_dir=None,
+    max_active_runs=2,
+    *,
+    profiles=None,
+    allowed_modes: Sequence[m.Mode] = ("full_agent",),
+    enable_evaluations: bool = False,
+):
+    """正式入口只开放完整 Agent；实验模式与评估由可信测试宿主显式启用。"""
+    modes = tuple(allowed_modes)
+    if (
+        not modes
+        or any(mode not in get_args(m.Mode) for mode in modes)
+        or len(set(modes)) != len(modes)
+    ):
+        raise ValueError("allowed_modes must contain unique supported runtime modes")
+    if type(enable_evaluations) is not bool:
+        raise ValueError("enable_evaluations must be a boolean")
+    service = RunService(
+        data_dir or Path.cwd() / "runs" / "workspace",
+        max_active_runs,
+        profiles=profiles,
+        enable_evaluations=enable_evaluations,
     )
+
+    def require_mode(mode):
+        # 创建与恢复采用相同的服务端策略，浏览器无法通过自造请求切换实验行为。
+        if mode not in modes:
+            raise WebError("mode_disabled", "当前工作台未开放该执行模式。", 422)
+
+    def require_evaluations():
+        if service.evaluations is None:
+            raise WebError("not_found", "未找到该资源。", 404)
+        return service.evaluations
 
     @asynccontextmanager
     async def lifespan(app):
@@ -54,9 +104,9 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
             await service.close()
 
     app = FastAPI(
-        title="Agent 演示工作台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+        title="Agent 项目工作台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
-    app.state.demo_service = service
+    app.state.run_service = service
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"]
     )
@@ -86,7 +136,7 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
                     {
                         "detail": {
                             "code": "origin_forbidden",
-                            "message": "仅允许从当前演示页面操作。",
+                            "message": "仅允许从当前工作台页面操作。",
                         }
                     },
                     status_code=403,
@@ -116,7 +166,7 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
             {
                 "detail": {
                     "code": "invalid_request",
-                    "message": "请求格式不正确，请检查问题、场景和运行模式。",
+                    "message": "请求格式不正确，请检查问题、执行配置和运行模式。",
                 }
             },
             status_code=422,
@@ -128,10 +178,10 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
         return {
             "version": __version__,
             "application": "project-workspace",
-            "demo_only": not any(item["ready"] and item["kind"] == "project" for item in entries),
             "profiles": entries,
-            "scenarios": SCENARIOS,
-            "capabilities": CAPABILITIES,
+            "capabilities": _CAPABILITIES,
+            "enabled_modes": list(modes),
+            "features": {"evaluations": enable_evaluations},
         }
 
     @app.get("/api/profiles")
@@ -148,10 +198,12 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.get("/api/evaluations")
     async def evaluations_list():
-        return {"evaluations": await service.evaluations.listing()}
+        repository = require_evaluations()
+        return {"evaluations": await repository.listing()}
 
     @app.post("/api/evaluations", status_code=201)
     async def evaluation_import(request: Request):
+        repository = require_evaluations()
         # JSON 解码前先统计流式读取的字节。单靠 Content-Length 无法限制
         # 分块请求，也无法应对客户端声明有误的情况。
         body = bytearray()
@@ -167,10 +219,11 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
                 "评估格式不正确，请检查指标范围、模式、任务数和带时区日期。",
                 422,
             ) from None
-        return await service.evaluations.create(report)
+        return await repository.create(report)
 
     @app.get("/api/evaluations/template")
     async def evaluation_template():
+        require_evaluations()
         # 这里只提供导入模板，不代表已持久化或实测的分数。
         report = EvaluationImport.model_validate(
             {
@@ -181,10 +234,8 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
                 "evaluator": "填写评估程序或评估者",
                 "evaluated_at": utc_now(),
                 "notes": "请填入实际评估时间、任务数和测量结果。未知指标保留 null。",
-                "results": [
-                    {"mode": mode, "task_count": 1}
-                    for mode in ("full_agent", "no_verifier", "fixed_retrieval")
-                ],
+                # 报告对照不受可执行模式限制；fixed 仅记录外部评估结果。
+                "results": [{"mode": mode, "task_count": 1} for mode in get_args(EvaluationMode)],
             }
         )
         return JSONResponse(
@@ -194,7 +245,8 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.get("/api/evaluations/{evaluation_id}")
     async def evaluation_detail(evaluation_id: str):
-        report = await service.evaluations.get(evaluation_id)
+        repository = require_evaluations()
+        report = await repository.get(evaluation_id)
         # 链接和服务端都声明下载行为。内嵌浏览器可能忽略 download 属性；
         # fetch 仍按 JSON 读取响应。
         # get() 会先校验持久化记录的身份，再将其写入此响应头。
@@ -211,21 +263,26 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
     @app.post("/api/runs", status_code=202)
     async def create(payload: StartRun):
-        if payload.profile_id is not None and payload.scenario is not None:
-            raise WebError("invalid_request", "执行配置与旧版场景不能同时指定。", 422)
+        require_mode(payload.mode)
         question = payload.question.strip()
         if not question:
             raise WebError("invalid_request", "请输入问题。", 422)
-        return await service.create(
-            question, payload.scenario, payload.mode, profile_id=payload.profile_id
-        )
+        return await service.create(question, payload.mode, profile_id=payload.profile_id)
 
     @app.get("/api/runs/{run_id}")
     async def detail(run_id: str):
         return await service.view(run_id)
 
+    @app.delete("/api/runs/{run_id}", status_code=204, response_class=Response)
+    async def delete(run_id: str):
+        """删除已停止任务的文件与持久状态；活动任务须先停止。"""
+        await service.delete(run_id)
+        return Response(status_code=204)
+
     @app.post("/api/runs/{run_id}/resume", status_code=202)
     async def recover(run_id: str):
+        record = await service.view(run_id)
+        require_mode(record["mode"])
         return await service.restart(run_id)
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
@@ -265,15 +322,27 @@ def create_app(data_dir=None, max_active_runs=2, *, profiles=None):
 
 
 def main():
-    """启动本地单工作进程服务器；数据位置与端口由调用方控制。"""
+    """先校验配置并注册真实端口，再启动本地单工作进程服务器。"""
     import uvicorn
 
-    parser = argparse.ArgumentParser(
-        description="启动本地 Agent 演示工作台（合成数据、无模型请求）"
+    parser = argparse.ArgumentParser(description="从 TOML 配置启动本地 Agent 项目工作台")
+    parser.add_argument(
+        "--config", type=Path, default=Path("config.toml"), help="服务端 TOML 配置文件"
     )
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--data-dir", type=Path, default=Path("runs/web-demo"))
+    parser.add_argument("--port", type=int, help="覆盖配置中的本机监听端口")
+    parser.add_argument("--data-dir", type=Path, help="覆盖配置中的运行记录目录")
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535:
+    if args.port is not None and not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
-    uvicorn.run(create_app(args.data_dir), host="127.0.0.1", port=args.port, workers=1)
+    try:
+        config = load_config(args.config)
+        profile = configured_profile(config)
+    except ConfigError as exc:
+        parser.error(str(exc))
+    data_dir = args.data_dir.expanduser().resolve() if args.data_dir else config.server.data_dir
+    app = create_app(
+        data_dir=data_dir,
+        max_active_runs=config.server.max_active_runs,
+        profiles=[profile],
+    )
+    uvicorn.run(app, host="127.0.0.1", port=args.port or config.server.port, workers=1)

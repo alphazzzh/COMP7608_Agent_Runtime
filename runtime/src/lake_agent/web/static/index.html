@@ -23,7 +23,7 @@
           <button class="nav-item is-active" data-view="workbench" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>智能问答<span class="nav-shortcut">01</span></button>
           <button class="nav-item" data-view="sources"><span class="nav-icon" aria-hidden="true">▤</span>数据来源<span class="nav-shortcut">02</span></button>
           <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true">◷</span>任务历史<span id="nav-history-count" class="nav-count">0</span></button>
-          <button class="nav-item" data-view="evaluations"><span class="nav-icon" aria-hidden="true">▥</span>实验评估<span class="nav-shortcut">04</span></button>
+          <button class="nav-item" data-view="evaluations" hidden><span class="nav-icon" aria-hidden="true">▥</span>实验评估<span class="nav-shortcut">04</span></button>
         </nav>
         <div class="sidebar-section-heading"><span>最近任务</span><button id="refresh-sidebar" class="icon-button" aria-label="刷新任务历史" title="刷新任务历史">↻</button></div>
         <div id="recent-runs" class="recent-runs"><p class="sidebar-empty">正在读取历史…</p></div>
@@ -39,7 +39,7 @@
           <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="关闭提示">×</button></div>
 
           <section id="view-workbench" class="page-view" aria-labelledby="workbench-title">
-            <div class="page-heading"><div><p class="eyebrow">ASK · EXPLORE · VERIFY</p><h1 id="workbench-title">让数据回答你的问题<span class="heading-dot">.</span></h1><p class="page-description">选择数据池与执行配置，用自然语言提问，查看答案和可追溯的证据。</p></div><span id="workspace-kind" class="demo-badge">执行配置加载中</span></div>
+            <div class="page-heading"><div><p class="eyebrow">ASK · EXPLORE · VERIFY</p><h1 id="workbench-title">让数据回答你的问题<span class="heading-dot">.</span></h1><p class="page-description">选择数据池与执行配置，用自然语言提问，查看答案和可追溯的证据。</p></div><span id="workspace-kind" class="profile-badge">执行配置加载中</span></div>
 
             <section class="setup-panel" aria-labelledby="question-heading">
               <div class="section-heading"><div class="number-label">01</div><h2 id="question-heading">提出问题</h2><span class="section-caption">选择配置后开始探索</span></div>
@@ -50,12 +50,12 @@
                 <div id="profile-readiness" class="profile-readiness" role="status"></div>
                 <div class="question-field"><div class="field-label-row"><label for="question">你想了解什么？</label><button type="button" id="reset-question" class="text-button" disabled>使用建议问题 <span aria-hidden="true">↗</span></button></div><textarea id="question" name="question" rows="3" maxlength="2000" placeholder="输入一个关于所选数据池的问题…" required disabled></textarea><div class="input-footer"><span id="question-hint">任务由所选配置的数据、规划与内容模块执行。</span><span id="question-count">0 / 2000</span></div></div>
                 <div id="suggested-questions" class="suggested-questions" aria-label="建议问题"></div>
-                <div class="run-form-footer"><div class="mode-field"><label for="mode">执行模式</label><select id="mode" name="mode"><option value="full_agent">完整 Agent · 规划 + 核验</option><option value="no_verifier">对照模式 · 关闭核验</option><option value="fixed_retrieval">对照模式 · 固定检索</option></select></div><button id="start-run" class="button button-primary" type="submit" disabled><span aria-hidden="true">↗</span> 开始提问</button></div>
+                <div class="run-form-footer"><div class="mode-field"><label for="mode">执行模式</label><select id="mode" name="mode"><option value="full_agent">完整 Agent · 核验按运行政策</option></select></div><button id="start-run" class="button button-primary" type="submit" disabled><span aria-hidden="true">↗</span> 开始提问</button></div>
               </form>
             </section>
 
             <section class="execution-section" aria-labelledby="execution-heading">
-              <div class="execution-heading"><div class="section-heading"><div class="number-label">02</div><h2 id="execution-heading">答案与证据</h2><span id="run-status" class="status-badge status-idle">等待提问</span></div><div id="run-actions" class="run-actions" hidden><button id="cancel-run" class="button button-small button-outline" hidden>停止运行</button><button id="resume-run" class="button button-small button-primary" hidden><span aria-hidden="true">↻</span> 恢复执行</button><a id="download-json" class="button button-small button-quiet" href="#" download>JSON <span aria-hidden="true">↓</span></a><a id="download-report" class="button button-small button-outline" href="#" download>任务报告 <span aria-hidden="true">↓</span></a></div></div>
+              <div class="execution-heading"><div class="section-heading"><div class="number-label">02</div><h2 id="execution-heading">答案与证据</h2><span id="run-status" class="status-badge status-idle">等待提问</span></div><div id="run-actions" class="run-actions" hidden><button id="cancel-run" class="button button-small button-outline" hidden>停止运行</button><button id="resume-run" class="button button-small button-primary" hidden><span aria-hidden="true">↻</span> 恢复执行</button><button id="delete-run" class="button button-small button-delete" type="button">删除任务</button><a id="download-json" class="button button-small button-quiet" href="#" download>JSON <span aria-hidden="true">↓</span></a><a id="download-report" class="button button-small button-outline" href="#" download>任务报告 <span aria-hidden="true">↓</span></a></div></div>
               <div id="selected-run-info" class="selected-run-info" hidden><h3 id="selected-run-question"></h3><span id="selected-run-label"></span><span id="selected-run-id" class="mono"></span></div>
               <div id="run-state-note" class="run-state-note" hidden></div>
               <section class="output-panel panel" aria-label="任务产出">
@@ -66,10 +66,11 @@
               <details id="audit-details" class="audit-details">
                 <summary><span>执行过程与原始记录</span><span id="event-count" class="muted-caption">0 个事件</span><span class="summary-chevron" aria-hidden="true">⌄</span></summary>
                 <div class="audit-body">
+                  <div class="timeline-task-picker"><label for="timeline-task">按提问查看执行记录</label><select id="timeline-task" disabled><option value="">选择一次提问</option></select><p id="timeline-context">每次提问单独记录；选择任务后查看对应的执行过程。</p></div>
                   <div class="metrics-grid" aria-label="从执行记录读取的运行指标"><div class="metric"><span>工具调用</span><strong id="metric-tools">—</strong><small>TOOLS</small></div><div class="metric"><span>执行步骤</span><strong id="metric-steps">—</strong><small>STEPS</small></div><div class="metric"><span>证据条目</span><strong id="metric-evidence">—</strong><small>EVIDENCE</small></div><div class="metric"><span>模型请求</span><strong id="metric-model_calls">—</strong><small>MODEL CALLS</small></div><div class="metric"><span>累计耗时</span><strong id="metric-duration_ms">—</strong><small id="metric-attempts">尚未开始</small></div></div>
                   <p class="audit-caption">这些是本任务的执行指标；答案质量指标请查看单独导入的实验评估。</p>
                   <div class="audit-grid">
-                    <section class="timeline-panel panel" aria-labelledby="timeline-heading"><div class="panel-heading"><h3 id="timeline-heading"><span class="timeline-heading-icon" aria-hidden="true">⌁</span>执行时间线</h3></div><div id="timeline" class="timeline"><div class="empty-state"><div class="empty-illustration" aria-hidden="true">⌁</div><h3>每一步，都有迹可循</h3><p>提问后显示规划、工具调用与证据记录。</p></div></div><div class="panel-footnote">选择事件，查看同一次执行尝试的请求与响应</div></section>
+                    <section class="timeline-panel panel" aria-labelledby="timeline-heading"><div class="panel-heading"><h3 id="timeline-heading"><span class="timeline-heading-icon" aria-hidden="true">⌁</span>执行时间线</h3></div><div class="timeline-toolbar"><label for="timeline-phase">执行阶段</label><select id="timeline-phase"><option value="all">全部阶段</option><option value="catalog">读取目录</option><option value="planning">模型规划</option><option value="execution">检索与工具</option><option value="answer">回答与核验</option><option value="state">状态与其他</option></select><input id="timeline-search" type="search" aria-label="搜索本任务事件" placeholder="搜索事件、工具或编号"><span id="timeline-count"></span></div><div id="timeline" class="timeline"><div class="empty-state"><div class="empty-illustration" aria-hidden="true">⌁</div><h3>每一步，都有迹可循</h3><p>提问后显示规划、工具调用与证据记录。</p></div></div><div class="panel-footnote">仅显示当前任务；展开阶段后选择事件，查看请求与响应。</div></section>
                     <section class="inspector-panel panel" aria-label="原始调用记录"><div class="panel-heading"><h3>原始记录</h3><span class="muted-caption">审计数据</span></div><div id="panel-details" class="inspector-content"></div></section>
                   </div>
                 </div>
@@ -88,7 +89,7 @@
 
           <section id="view-history" class="page-view" aria-labelledby="history-title" hidden>
             <div class="page-heading"><div><p class="eyebrow">PERSISTENT TASK HISTORY</p><h1 id="history-title">每次探索，都有记录<span class="heading-dot">.</span></h1><p class="page-description">回看答案、证据和执行尝试，继续处理可安全恢复的任务。</p></div><button id="refresh-history" class="button button-outline"><span aria-hidden="true">↻</span> 刷新历史</button></div>
-            <div class="history-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="搜索问题、配置或任务 ID" aria-label="搜索任务历史"></label><label class="filter-field"><span>状态</span><select id="history-filter" aria-label="按任务状态筛选"><option value="all">全部状态</option><option value="active">运行中</option><option value="completed">已完成</option><option value="insufficient_evidence">证据不足</option><option value="budget_exceeded">预算停止</option><option value="timeout">超时</option><option value="paused">已暂停</option><option value="interrupted">已中断</option><option value="failed">执行错误 / 恢复受阻</option></select></label><span id="history-count" class="muted-caption">0 次任务</span></div><div id="history-list" class="history-list"></div>
+            <div class="history-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="搜索问题、配置或任务 ID" aria-label="搜索任务历史"></label><label class="filter-field"><span>状态</span><select id="history-filter" aria-label="按任务状态筛选"><option value="all">全部状态</option><option value="active">运行中</option><option value="completed">已完成</option><option value="insufficient_evidence">证据不足</option><option value="budget_exceeded">预算停止</option><option value="timeout">超时</option><option value="interrupted">已中断</option><option value="failed">执行错误 / 恢复受阻</option></select></label><span id="history-count" class="muted-caption">0 次任务</span></div><div id="history-list" class="history-list"></div>
           </section>
 
           <section id="view-evaluations" class="page-view" aria-labelledby="evaluations-title" hidden>

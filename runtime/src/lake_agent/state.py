@@ -216,6 +216,14 @@ class SqliteStateStore:
         """释放所有权；重复释放同一个租约不会产生额外影响。"""
         await self._invoke(self._release, lease, allow_closed=True)
 
+    async def delete(self, run_id: str) -> None:
+        """维护操作：拒绝活动租约，在单事务中删除指定运行和调用账本。
+
+        不属于执行端口协议；仅供拥有运行生命周期的宿主显式删除历史。
+        保留锁文件 inode，使其他进程仍通过原有 flock 判断所有权。
+        """
+        await self._invoke(self._delete, run_id)
+
     async def aclose(self) -> None:
         """释放全部自有描述符，即使其中一次数据库更新失败也如此。"""
         await self._invoke(self._close, allow_closed=True)
@@ -444,6 +452,19 @@ class SqliteStateStore:
 
     def _acquire(self, run_id: str) -> StateLease:
         return self._take_lease(run_id, None)
+
+    def _delete(self, run_id: str) -> None:
+        run_id = _identifier(run_id)
+        with self._connection():
+            pass  # 与 acquire 相同，须先建立数据库和锁目录。
+        descriptor = self._lock_run(run_id)
+        try:
+            with self._transaction() as connection:
+                # 显式按外键顺序删除；事务失败时两张表一起回滚。
+                connection.execute("DELETE FROM call_records WHERE run_id=?", (run_id,))
+                connection.execute("DELETE FROM run_states WHERE run_id=?", (run_id,))
+        finally:
+            self._unlock(descriptor)
 
     def _owned(self, lease: StateLease) -> tuple[StateLease, int]:
         if (

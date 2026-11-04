@@ -11,14 +11,14 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any, TypeVar
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from pydantic import BaseModel
 
-from .models import Candidate, EvidenceRecord, SourceRecord, Subtask, ToolPlan, ToolSpec, ToolStep
+from .models import SourceRecord, ToolSpec
 
 T = TypeVar("T")
 
@@ -167,7 +167,7 @@ def source_ids_for(spec: ToolSpec, args: dict[str, Any]) -> set[str]:
     """先校验工具参数，再精确提取注册的数据源 ID。
 
     通配符只展开数组。值缺失、类型错误或数据源字符串为空时，均拒绝继续。
-    调用方将所得集合与 ToolStep.source_ids 及当前候选源和证据的授权集合比较。
+    调用方将所得集合与 ToolStep.source_ids 及控制器提供的运行内来源授权集合比较。
     """
     try:
         canonical_json(args)
@@ -242,36 +242,3 @@ def validate_dag(items: Iterable[T], id_field: str) -> list[T]:
             stack.append((key, True))
             stack.extend((dep, False) for dep in reversed(dependencies[key]))
     return ordered
-
-
-def validate_tool_plan(
-    plan: ToolPlan,
-    subtask: Subtask,
-    candidates: Iterable[Candidate],
-    evidence: Iterable[EvidenceRecord],
-    tool_specs: Mapping[str, ToolSpec],
-    used_step_ids: set[str],
-    max_steps: int,
-) -> list[ToolStep]:
-    """整体校验完整计划，不修改 ID，也不派发工具。
-
-    控制器在调用本辅助函数前，将超预算计划映射为 step_budget；
-    独立调用本函数时，超预算会抛出 ValueError。
-    """
-    if len(plan.steps) > max_steps:
-        raise ValueError("tool plan exceeds remaining step budget")
-    steps = validate_dag(plan.steps, "step_id")
-    authorized = {item.source_id for item in candidates} | {item.source_id for item in evidence}
-    for step in steps:
-        if step.step_id in used_step_ids or step.subtask_id != subtask.subtask_id:
-            raise ValueError("reused step ID or wrong subtask")
-        if step.tool_name not in tool_specs:
-            raise ValueError("unregistered tool")
-        actual = source_ids_for(tool_specs[step.tool_name], step.args)
-        if (
-            len(set(step.source_ids)) != len(step.source_ids)
-            or actual != set(step.source_ids)
-            or not actual <= authorized
-        ):
-            raise ValueError("tool source authorization failed")
-    return steps

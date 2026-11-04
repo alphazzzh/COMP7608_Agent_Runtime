@@ -16,18 +16,13 @@ def html_report(view):
     result = view.get("result") or {}
     answer = result.get("answer") or {}
     profile = view.get("profile") or {}
-    is_demo = profile.get("kind", "demo") == "demo"
-    environment = "合成数据 · 离线规则演示" if is_demo else "项目任务 · 已注册执行配置"
-    identity = profile.get("title") or view.get("scenario") or "未记录配置"
+    environment = "项目任务 · 运行记录"
+    identity = profile.get("title") or view.get("profile_id") or "未记录配置"
     modules = " · ".join(
         f"{name}: {value['label']} ({value['status']})"
         for name, value in profile.get("modules", {}).items()
     )
-    boundary = (
-        "此任务使用合成资料与离线规则，输出不代表真实模型或真实数据池质量。"
-        if is_demo
-        else "此报告保存任务结果和配置身份。请结合来源、模块接入状态与独立评估判断答案质量。"
-    )
+    boundary = "此报告保存任务结果和配置身份。请结合来源、模块接入状态与独立评估判断答案质量。"
     evidence = (
         "".join(
             f"<article><h3>{text(item['source_id'])}</h3><p>{text(item['payload'])}</p><small>{text(item['evidence_id'])}</small></article>"

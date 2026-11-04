@@ -21,7 +21,6 @@ web = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
 dev = ["pytest>=8.3,<10", "pytest-asyncio>=1,<2", "ruff>=0.12"]
 
 [project.scripts]
-lake-agent-demo = "lake_agent.demo:main"
 lake-agent-web = "lake_agent.web.app:main"
 
 [tool.hatch.build.targets.wheel]

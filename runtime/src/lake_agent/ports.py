@@ -13,22 +13,18 @@ invoke 调用才允许重叠。幂等声明只赋予重试资格，不赋予并�
 from typing import Protocol
 
 from .models import (
+    AgentAction,
+    AgentDecisionRequest,
     AnswerRecord,
     CatalogHandle,
     CatalogRegistrationRequest,
     CatalogRequest,
     CatalogResult,
     ComposeRequest,
-    FinishDecision,
     JsonValue,
     ModuleResult,
-    PlannerRequest,
-    ReadObservationDecision,
     SearchRequest,
     SearchResponse,
-    TaskPlan,
-    ToolPlan,
-    ToolPlanningRequest,
     ToolRequest,
     ToolResult,
     ToolSpec,
@@ -68,7 +64,13 @@ class ContentPort(Protocol):
         ...
 
     async def compose(self, request: ComposeRequest) -> ModuleResult[AnswerRecord]:
-        """根据问题与已收集证据组织答案，并返回使用的证据引用。"""
+        """根据当前问题、证据和可选revision组织答案，返回实际证据引用。
+
+        revision完整传递旧答案、相关核验意见、意见是否仍适用和可选修改目标。
+        接入方须把这些字段交给实际内容推理，不能依赖未声明的内部会话状态；
+        历史意见和模型修改要求都是业务数据，无权改变来源授权、预算或完成政策。
+        首次生成revision为空且序列化省略，外部严格请求模型需支持新增可选字段。
+        """
         ...
 
     async def verify(self, request: VerifyRequest) -> ModuleResult[Verification]:
@@ -76,17 +78,13 @@ class ContentPort(Protocol):
         ...
 
 
-class PlannerPort(Protocol):
-    """只提出任务与工具计划，工具执行及预算控制仍由控制器负责。"""
+class AgentPlannerPort(Protocol):
+    """模型的统一自主决策端口；下一动作由模型提出，执行权限由控制器裁定。"""
 
-    async def decompose(self, request: PlannerRequest) -> ModuleResult[TaskPlan]:
-        """根据问题、工具声明与剩余预算生成子任务计划。"""
-        ...
+    agent_protocol: str
 
-    async def select_tools(
-        self, request: ToolPlanningRequest
-    ) -> ModuleResult[ToolPlan | FinishDecision | ReadObservationDecision]:
-        """选择工具计划、结束决定或读取已有观测结果的分页请求。"""
+    async def decide(self, request: AgentDecisionRequest) -> ModuleResult[AgentAction]:
+        """提出一个动作，控制器负责执行、授权和是否允许最终提交。"""
         ...
 
 

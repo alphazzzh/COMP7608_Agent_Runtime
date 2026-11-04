@@ -5,3 +5,7 @@ __pycache__/
 dist/
 runs/
 *.egg-info/
+# 私有服务配置；脱敏样例仍随源码交付。
+config.toml
+config.*.toml
+!config.example.toml

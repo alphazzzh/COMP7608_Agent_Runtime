@@ -1,22 +1,52 @@
 # 异构数据池 Agent Harness：运行控制与异步执行接口契约 v0.5
 
-**更新日期：** 2026-11-02（核心契约 v0.5；持久恢复首次发布于包 0.4.0）
+**更新日期：** 2026-11-04（A/C 契约 v0.5 增量修订字段；B 统一采用 agent-loop-v1）
 
-**状态：** 当前运行时包 `0.7.0` 沿用本核心契约；v0.5 在既有受控工具并行基础上增加可选持久调用状态与严格同版本恢复。后续工作台与服务端执行配置不改变核心端口；其接入与HTTP接口见[项目工作台说明](project-workspace.md)。此状态不构成真实数据或模型联调通过声明。
+**状态：** 当前运行时包 `0.7.0` 沿用本核心契约；v0.5 在既有受控工具并行基础上增加可选持久调用状态与严格同版本恢复，当前另提供显式 opt-in 的 `content-feedback-v1` 请求扩展。工作台与服务端执行配置不改变核心方法签名；其接入与HTTP接口见[项目工作台说明](project-workspace.md)。此状态不构成真实数据或模型联调通过声明。
 
 **范围：** 定义运行控制器（任务规划与运行控制）与调用方、数据模块、内容模块、规划器及 trace 的输入输出。Harness 面向通用异构数据池；Lake 数据集只用于评测，在线控制策略不读取其标签，也不预设某个数据集的工具名称或数据格式。Python 包名保持 `lake_agent`。
 
-v0.5 保留异步端口方法和 JSON `schema_version="1.0"`，新增可选 `StateStore` 与 `resume`。v0.4 已引入的 `RunConfig.max_parallel_tool_calls`、`ToolSpec.parallel_safe/exclusive_resource_keys` 及终止事件的逐调用列表继续有效，均有保守默认值。此前 v0.3 新增的 `ReadObservationDecision`、工具观察与错误恢复继续有效。文档版本、包版本和 JSON 结构版本分别管理。使用严格旧模型的消费者必须同步 `RunConfig`、`ToolSpec`、`ToolPlanningRequest`、`ErrorInfo`、规划决策、`CallCounts` 和终止事件 detail，不能仅因 `schema_version` 未变就假定可直接接收新字段。
+A/C 异步方法及 JSON `schema_version="1.0"` 保持；ComposeRequest 增加默认空的 revision，AgentComposeDecision 增加默认空的 revision_instructions。首次生成省略 revision；外部严格消费者需升级共享模型并实现修订数据，不能仅凭 schema_version 相同推断兼容。输出错误修正另要求 C 显式支持请求子类。B 的唯一规划协议为 `AgentPlannerPort.decide`。运行时不再提供两阶段规划、固定检索生产模式或自动回退图。文档版本、包版本和 JSON 结构版本独立。
 
-0.7.0起由LangGraph组织实际流程节点；本契约的端口、请求/结果、预算及恢复语义不变。授权与执行仍由控制器负责，恢复以SQLite调用日志为准，不启用第二套图checkpointer。
+LangGraph 只组织动作路由；授权、预算和结果提交仍由运行控制器负责。SQLite 已验证调用账本是恢复依据，不启用第二套图 checkpointer。
+
+## 唯一执行流程：agent-loop-v1
+
+公开执行入口仍为 `lake_agent.runtime.run/resume`。`engine/graph_runner.py` 负责共享图执行、追踪隔离与取消收尾，实际图由 `engine/agent_workflow.py` 构造；原 `workflow.py` 中仍在使用的共享执行机制已移动并改名。初始化目录后，运行始终采用模型决策与动作观察循环，不再根据规划器能力选择另一套业务流程。不支持当前协议的端口在任何外部调用前以 `invalid_planner_protocol` 拒绝；持久运行的对应拒绝码为 `recovery_engine_mismatch`。
+
+目录整理不改变 `models.py`、`ports.py`、`runtime.py`、`config.py`、`state.py`、`trace.py` 与 `validation.py` 的公共路径。真实 JSON 规划器现位于 `adapters/planner.py`，内部图与恢复位于 `engine/`；评估报告格式位于 `evaluation/models.py`，固定基线运行器只在 `tests/`。完整映射见[源码目录说明](source-layout.md)。
+
+“控制器是唯一执行决策者”指最终执行授权与调度：模型选择行动策略，控制器校验后执行或拒绝。它不要求每个问题使用同一种业务流程。目录和工具初始化后每轮调用 `planner.decide`；规划器必须声明 `agent_protocol = "agent-loop-v1"` 并实现 `decide(AgentDecisionRequest) -> ModuleResult[AgentAction]`。
+
+请求保留 ModelCallContext，公开输入为 question、catalog_snapshot_id、tool_specs、budget_remaining、context、remaining_turns、require_verification。context 包含目录/候选、可选计划、已知观察/证据预览、已有答案、核验及上次动作结果。总工作上下文受 max_planner_context_bytes 约束，省略和截断显式记录；请求读取的页保持完整，recent previous_pages 有界保留。已接纳的工具结果工件不因工作上下文预览而截断；错误诊断和被拒输出按第4节单独限制预览。question、工具 schema 等静态字段还受规划器整个 HTTP 请求大小限制。
+
+| kind | 行为与约束 |
+|---|---|
+| search | 自选 query 和可选 source_ids 过滤；来源必须在冻结目录内，空数组表示空范围 |
+| tools | 选择已注册工具批次；每步含 step_id/tool_name/source_ids/args/depends_on/purpose，不要求先检索或建立子任务 |
+| read_observation | 读取当前运行已保存观察的 JSON Pointer 页面，沿用原读取预算 |
+| read_catalog | 按 offset/limit 分页查看目录元数据；不能把元数据当正文证据 |
+| plan | 替换可选 subtasks 和 completed_subtask_ids；可为空，仍校验 DAG 和子任务上限；不固定后续行动顺序 |
+| compose | 通过 ContentPort.compose 组织或修订答案，可带 revision_instructions；允许 evidence=[]，返回引用仍须属于实际证据 |
+| verify | 通过原 ContentPort.verify 检查当前答案，反馈交回模型；无答案时拒绝并允许下一轮修正 |
+| finish | 模型提出完成；控制器按当前政策接受或拒绝，当前有效的不支持核验及未解决内容错误阻止 completed |
+| stop | 说明无法继续的原因并以 insufficient_evidence/agent_stopped 停止，可保留已有答案 |
+
+`RunConfig.max_agent_turns` 默认32，每次模型决策消耗一轮，即使返回 Usage.local() 也不豁免；达到上限返回 budget_exceeded/agent_turn_budget。`require_verification` 默认false，允许未核验完成；为true时 finish 必须有绑定当前完整答案、证据和政策的 supported 核验，否则以可继续决策的拒绝观察返回模型。相关输入变化使旧核验过期；完整输入相同的再次生成保留原判定。过期不等于当前答案已被证明错误。completed、内部核验通过、外部评测正确相互区别。测试 no_verifier 下核验动作被拒绝，与 require_verification=true 的组合在外部调用前停止。
+
+所有动作经过同一控制器的预算、超时、工具 schema、来源授权、并发、取消、引用与审计边界。新工具动作使用控制器内部单运行 scope，不要求模型或 A/C 实现新增子任务流程；A 仍接收同样 ToolRequest。C 通过已有 prepare_catalog 获得目录，可用标签说明可用来源，但正文事实必须来自实际输入证据，不能制造 evidence_id。
+
+恢复继续从已知响应日志重建，`planner.decide` phase 使用严格 AgentDecisionRequest/ModuleResult[AgentAction]；持久状态记录固定的 planner_engine="agent-loop-v1"，恢复前验证端口协议。不会重新请求已完成的模型决策，也不会重放结果未知的外部调用。新源码的指纹与旧运行不一致时拒绝跨版本恢复。
+
+显式支持的内容输出错误可进入新的自主决策；这不是适配器内重试。未解决反馈阻止 finish；新内容输出仍必须通过引用授权，Full 强制 supported 与 no_verifier 规则不变。详细错误 schema、能力协商和 provider messages 约定见[内容反馈说明](content-feedback.md)。
 
 ## 1. 设计原则
 
-1. 运行控制器是唯一的执行决策者：模型可以提出计划或工具动作，运行控制器校验后决定是否执行、重试、继续或停止。
+1. 模型决定行动策略，运行控制器拥有最终执行授权与调度权：控制器校验动作后决定是否获准执行，并落实预算、重试、取消和停止边界。
 2. 跨模块边界只传 JSON 可序列化数据和稳定 ID，不传 Python 对象、文件句柄、DataFrame 或模型私有推理过程。
 3. 工具只从数据模块注册的能力清单中选择；名称和参数都按本地 JSON Schema 校验，禁止模型提交任意 Python、Shell 或未经约定的 SQL。
-4. 每一步都有显式预算、状态和事件记录。暂时性调用错误的重试与验证器（内容模块的 `verify` 方法）触发的重新规划分开处理。
-5. 公开运行入口、数据模块/内容模块/规划器调用和 trace 写入均为异步接口。单 run 内只有经过可信工具声明和来源/资源冲突检查的 `DataPort.invoke` 可以并行等待 I/O；预算、意图、结果、观察、证据和步骤状态由控制器串行结算。模型、子任务规划及内容模块调用保持顺序，不因工具并行扩大范围。调用方仍可并发调度不同 run。
+4. 每一步都有显式预算、状态和事件记录。暂时性调用错误的重试与模型依据核验观察选择新动作分开处理。
+5. 公开运行入口、数据模块/内容模块/规划器调用和 trace 写入均为异步接口。单 run 内只有经过可信工具声明和来源/资源冲突检查的 `DataPort.invoke` 可以并行等待 I/O；预算、意图、结果、观察、证据和步骤状态由控制器串行结算。模型决策及内容模块调用保持顺序，不因工具并行扩大范围。调用方仍可并发调度不同 run。
 6. 完整审计结果、有界规划上下文和可引用证据分别管理。工具观察支持后续决策，但只有显式证据经过结构及来源校验后才能进入答案引用。
 
 ## 2. 运行控制器的公开入口
@@ -27,7 +57,7 @@ async def run(
     *,
     data: DataPort,          # 数据模块提供
     content: ContentPort,    # 内容模块提供
-    planner: PlannerPort,    # 规划器/模型适配器
+    planner: AgentPlannerPort,    # 规划器/模型适配器
     trace: TraceSink,
     state_store: StateStore | None = None,  # 可选；调用方管理生命周期
 ) -> RunResult:
@@ -45,7 +75,7 @@ async def run(
 ```python
 async def resume(
     run_id: str, *, data: DataPort, content: ContentPort,
-    planner: PlannerPort, trace: TraceSink, state_store: StateStore,
+    planner: AgentPlannerPort, trace: TraceSink, state_store: StateStore,
 ) -> RunResult:
     ...
 ```
@@ -57,6 +87,8 @@ async def resume(
 每次外部派发前写 `started`，有效响应返回后立即写 `completed`；并行 worker 各自提交响应，不等待同伴。控制器仍唯一拥有授权、预算、观察与证据状态。JSONL 是审计，不能代替持久调用账本。恢复逐项匹配已知请求/响应重建状态；完整控制器 ID 序列保持稳定，不重新派发历史模型或工具请求。未知 `started` 调用以 `StateStoreError.code="recovery_outcome_unknown"` 拒绝恢复，包含幂等工具。
 
 恢复读取要求运行时版本、实际源码摘要及请求/结果身份等状态校验通过；继续尚未终结的运行还要求可信工具契约一致。原绝对 UTC deadline 包含停机时间，历史预算不重置；正常终态（含预算停止与 provider 403 等普通错误）直接返回原结果，不读取工具清单或重新比较工具契约。取消、审计或状态写入故障仅在全部相关外部结果已知时可能恢复。源码变更、请求分叉或损坏状态均不能退回真实调用来尝试。
+
+持久状态另记录受支持的 `content_feedback_protocol` 或 null。恢复在返回缓存终态及异步端口调用前比较当前 C 能力，变化以 `recovery_contract_mismatch` 拒绝。失败内容响应和扩展修正请求按调用日志严格重建，不依赖 C 的会话内存；修正调用只有 started、没有有效 completed 时也以 `recovery_outcome_unknown` 拒绝，原预算和期限不刷新。
 
 首次新派发前，用原目录 snapshot/digest 在全新 ContentPort 重新执行本地 `prepare_catalog`，验证新的临时 handle；这是真实额外调用，计入 content 次数和已报告用量，必须返回 `provider_requests=0`。辅助身份独立于历史 ID 流。未知用量保持 null；违反本地调用契约也不能抹去已报告的实际 provider 请求。
 
@@ -71,7 +103,7 @@ async def resume(
 | `schema_version` | literal string | 否 | 固定为 `1.0`，省略时默认 `1.0` |
 | `task_id` | string | 是 | 数据集或实验中的稳定任务 ID |
 | `question` | string | 是 | 原始自然语言问题，不包含 gold answer |
-| `mode` | enum | 否 | `fixed_retrieval`、`no_verifier` 或 `full_agent`；默认 `full_agent` |
+| `mode` | enum | 否 | `no_verifier` 或 `full_agent`；默认 `full_agent` |
 | `run_id` | string/null | 否 | 外部关联 ID；null 时由运行控制器生成 |
 | `config` | `RunConfig` | 否 | 本次运行的限制和版本信息；省略时构造默认 `RunConfig` |
 
@@ -84,19 +116,19 @@ async def resume(
 | `max_wall_time_ms` | integer | 是 | 整个 run 的墙钟时间上限 |
 | `per_call_timeout_ms` | integer | 是 | 单个数据模块/内容模块/规划器调用的超时上限 |
 | `cancel_cleanup_timeout_ms` | integer | 是 | 调用方取消后，追加取消事件并关闭 trace 的独立清理上限；不计入正常 run deadline |
-| `max_subtasks` | integer | 是 | `TaskPlan` 最多包含的子任务数，与 `DataPort.invoke` 步骤预算分开 |
+| `max_subtasks` | integer | 是 | 可选 `plan` 动作包含的子任务上限，与工具步骤预算分开；不要求建立计划 |
+| `max_agent_turns` | integer | 否 | 默认 32；每次 `decide` 消耗一轮，独立于 provider 请求数 |
+| `require_verification` | boolean | 否 | 默认 false；true 时必须有当前有效的 supported 核验才可接受 finish；no_verifier 不允许与 true 组合 |
 | `max_plan_steps` | integer | 是 | 本次 run 最多启动的 DataPort.invoke 逻辑步骤；目录分页和内容模块/规划器调用不计入 |
 | `max_data_calls` | integer | 是 | DataPort.catalog 与 DataPort.invoke 的物理调用尝试总数，失败调用和重试也计数 |
 | `max_model_calls` | integer | 是 | 实际发起模型推理的请求总数；本地目录注册/搜索不计入 |
 | `max_retries_per_data_operation` | integer | 是 | 每个 DataPort.catalog/DataPort.invoke 逻辑操作可增加的重试次数；0 表示不重试 |
-| `max_feedback_rounds` | integer | 是 | `full_agent` 最多根据验证器建议重新规划的轮数 |
 | `candidate_top_k` | integer | 是 | 单次 ContentPort.search 返回的候选源上限 |
 | `max_output_bytes_per_call` | integer | 是 | 数据模块、内容模块、规划器单次响应的最大序列化大小 |
 | `catalog_page_size` | integer | 是 | 数据模块每次返回的目录条目数 |
 | `max_catalog_sources` | integer | 是 | 运行控制器本次最多接收的目录条目数；超出时拒绝用部分目录运行 |
 | `max_catalog_bytes` | integer | 是 | 完整目录 `SourceRecord[]` 规范化 JSON 的 UTF-8 字节上限，含序列化字段开销 |
-| `fixed_extract_max_chars` | integer | 是 | 固定检索模式每个来源最多抽取的字符数 |
-| `max_planner_context_bytes` | integer | 否 | 默认 24000，最小 1024；`evidence_summary`、`tool_observations`、`context_status`、`observation_read` 四字段规范化 JSON 总 UTF-8 字节上限 |
+| `max_planner_context_bytes` | integer | 否 | 默认 24000，最小 1024；完整 `AgentDecisionRequest.context` 规范化 JSON 总 UTF-8 字节上限 |
 | `planner_preview_bytes` | integer | 否 | 默认 2000，最小 256，且不超过 `max_planner_context_bytes` 的一半；单个字段预览与观察读取页的字节目标，实际装箱可缩小预览或省略条目 |
 | `max_observation_reads` | integer | 否 | 默认 8，允许 0；每个 run 成功接受的本地观察读取次数上限 |
 | `max_identical_tool_calls` | integer | 否 | 默认 2，最小 1；相同子任务、工具名称和规范化参数可接受的逻辑动作次数上限 |
@@ -109,11 +141,13 @@ async def resume(
 | `code_version` | string/null | 否 | Git commit、发布版本或代码哈希 |
 | `config_version` | string | 是 | 本次运行配置版本 |
 
-每次 `PlannerPort` 请求使用 `prompt_versions.planner`；`ContentPort.compose` 和 `ContentPort.verify` 使用 `prompt_versions.content`。放入 `ModelCallContext` 的 `prompt_version` 只包含当前调用对应的单个字符串，不直接传整个 `prompt_versions` 对象。
+每次 `AgentPlannerPort.decide` 请求使用 `prompt_versions.planner`；`ContentPort.compose` 和 `ContentPort.verify` 使用 `prompt_versions.content`。放入 `ModelCallContext` 的 `prompt_version` 只包含当前调用对应的单个字符串，不直接传整个 `prompt_versions` 对象。
 
-表中“必需”指有效配置中的字段；共享 `RunConfig` 会为省略的字段填充默认值。规划提示词默认版本为 `planner-v0.2-observations`，内容提示词默认版本仍为 `content-v0.1`。共享模型采用严格类型并拒绝额外字段，所有上限须满足表中整数约束；重试数、反馈轮数及观察读取次数允许为零，token 上限可为 null，非 null 时须为正整数。旧工具的 `parallel_safe` 默认为 false，因此省略新字段时不会因并发上限默认 4 而自动并行。
+`prompt_version` 是宿主配置声明的审计标签，不验证外部模块实际发出的提示正文。本轮内容修正扩展不改默认标签或私有配置；实际协议、调用请求/事件和源码摘要共同提供行为证据。
 
-当前以时间、调用次数、单次响应字节数、规划上下文字节数及完整规划 HTTP 请求字节数控量，不宣称 token 硬预算。未来若启用 token cap，须先定义与指定模型匹配的完整输入 tokenizer、每次输出上限及实际 usage 对账；只裁剪工作上下文不足以提供此保证。一次已开始的失败请求仍消耗模型调用数、时间及实际 token/费用。未发生或未测到的用量分别按已知的 0 或 `null` 记录，不得把未知用量填为 0。每个 PlannerPort 调用以及内容模块的 `compose`/`verify` 最多发起一个模型请求；`prepare_catalog`/`search` 仅执行本地索引或检索，不发模型请求。adapter/SDK 必须关闭隐式重试和后台请求。`max_data_calls` 包含 DataPort.catalog 分页和 DataPort.invoke 的全部物理尝试及中断时保留的意图预留；工具并行不会增加该额度。
+表中“必需”指有效配置中的字段；共享 `RunConfig` 会为省略的字段填充默认值。规划提示词默认版本为 `planner-v1.1-exploration`，内容提示词默认版本仍为 `content-v0.1`。共享模型采用严格类型并拒绝额外字段，所有上限须满足表中整数约束；重试数及观察读取次数允许为零，token 上限可为 null，非 null 时须为正整数。旧工具的 `parallel_safe` 默认为 false，因此省略新字段时不会因并发上限默认 4 而自动并行。
+
+当前以时间、调用次数、单次响应字节数、规划上下文字节数及完整规划 HTTP 请求字节数控量，不宣称 token 硬预算。未来若启用 token cap，须先定义与指定模型匹配的完整输入 tokenizer、每次输出上限及实际 usage 对账；只裁剪工作上下文不足以提供此保证。一次已开始的失败请求仍消耗模型调用数、时间及实际 token/费用。未发生或未测到的用量分别按已知的 0 或 `null` 记录，不得把未知用量填为 0。每个 AgentPlannerPort.decide 调用以及内容模块的 `compose`/`verify` 最多发起一个模型请求；`prepare_catalog`/`search` 仅执行本地索引或检索，不发模型请求。adapter/SDK 必须关闭隐式重试和后台请求。`max_data_calls` 包含 DataPort.catalog 分页和 DataPort.invoke 的全部物理尝试及中断时保留的意图预留；工具并行不会增加该额度。
 
 ## 3. 运行控制器与数据端口
 
@@ -190,11 +224,11 @@ class DataPort(Protocol):
 | `parallel_safe` | boolean | 默认 false，严格布尔值；可信 adapter 承诺同实例、同快照的独立调用可以安全并行，独立于幂等重试权限 |
 | `exclusive_resource_keys` | string[] | 默认空数组；非空字符串组成的静态互斥资源 key，列表中不得重复；不同工具访问同一连接、文件或引擎等互斥资源时声明相同 key |
 
-`parallel_safe`、互斥 key、来源路径与参数 schema 均由可信数据 adapter 的本地注册提供，规划器不能在 `ToolStep` 中覆盖。`idempotent=true` 只声明重试安全，不推导 `parallel_safe=true`；反之，允许安全并行也不授予自动重试权限。未声明安全并行的旧工具保持串行。运行控制器重新严格校验并复制工具注册记录及嵌套元数据，拒绝重复 key 或绕过模型校验的错误类型，防止 adapter 后续修改原对象改变当前 run 的权限或资源声明。跨 adapter 调用的请求使用深层隔离副本；规划器即使修改收到的工具 schema、来源路径或并行声明，也不能修改控制器的可信注册表。接入代码应按字段值比较注册结果，不依赖 Python 对象身份。互斥 key 只约束当前 run 的调度，跨 run 共享资源仍需 adapter 自行保证可重入与互斥。
+`parallel_safe`、互斥 key、来源路径与参数 schema 均由可信数据 adapter 的本地注册提供，规划器不能在工具步骤中覆盖。`idempotent=true` 只声明重试安全，不推导 `parallel_safe=true`；反之，允许安全并行也不授予自动重试权限。未声明安全并行的旧工具保持串行。运行控制器重新严格校验并复制工具注册记录及嵌套元数据，拒绝重复 key 或绕过模型校验的错误类型，防止 adapter 后续修改原对象改变当前 run 的权限或资源声明。跨 adapter 调用的请求使用深层隔离副本；规划器即使修改收到的工具 schema、来源路径或并行声明，也不能修改控制器的可信注册表。接入代码应按字段值比较注册结果，不依赖 Python 对象身份。互斥 key 只约束当前 run 的调度，跨 run 共享资源仍需 adapter 自行保证可重入与互斥。
 
-为支持 `fixed_retrieval`，数据模块需提供一个只读 `extract` 工具，参数至少为 `source_id: string`、`query: string`、`max_chars: integer`；它返回可引用的文本或结构化片段。数据模块可另提供 `inspect`、`query`、`download` 等工具，各自参数完全由其 `input_schema` 定义。`extract` 的 `data.evidence` 是 `EvidencePayload[]`，允许空数组表示成功但无匹配内容。
+生产运行不要求某个工具名称或固定提取参数。数据模块可提供 `inspect`、`query`、`extract`、`download` 等工具，各自参数完全由其 `input_schema` 定义。下文使用 `extract` 作为接入示例；是否调用、何时调用以及使用哪个来源均由模型选择。显式 `data.evidence` 是 `EvidencePayload[]`，允许空数组表示成功但无匹配内容。
 
-每个会引用来源的工具必须设 `uses_sources=true`，并在 `source_id_paths` 完整列出所有必需来源 ID 参数位置；不读取来源的纯计算工具设 `uses_sources=false` 且路径为空。例如 `extract` 为 `["/source_id"]`，多来源数组可用 `["/source_ids/*"]`。包含 `*` 的数组 schema 必须声明 `minItems >= 1`，空数组不得作为有来源工具的授权依据。运行控制器在加载工具清单时检查该字段组合及路径与 `input_schema` 一致；不完整或无效的定义按数据工具契约错误拒绝。执行时运行控制器解析路径，要求提取出的 ID 集合与规划器提交的 `ToolStep.source_ids` 一致，并验证它们属于当前子任务候选来源、已进入本 run 的证据来源，或已接受工具观察的授权来源。这样本地 JSON Schema 负责类型/形状校验，来源路径元数据负责授权范围校验；数据模块返回的 `EvidencePayload.source_id` 也必须与本次实际参数来源一致。
+每个会引用来源的工具必须设 `uses_sources=true`，并在 `source_id_paths` 完整列出所有必需来源 ID 参数位置；不读取来源的纯计算工具设 `uses_sources=false` 且路径为空。例如 `extract` 为 `["/source_id"]`，多来源数组可用 `["/source_ids/*"]`。包含 `*` 的数组 schema 必须声明 `minItems >= 1`，空数组不得作为有来源工具的授权依据。运行控制器在加载工具清单时检查该字段组合及路径与 `input_schema` 一致；不完整或无效的定义按数据工具契约错误拒绝。执行时运行控制器解析路径，要求提取出的 ID 集合与规划器提交的 `AgentToolStep.source_ids` 一致，并验证它们属于当前冻结的完整来源目录；候选检索仅提供相关性提示，不缩小目录授权范围。这样本地 JSON Schema 负责类型/形状校验，来源路径元数据负责授权范围校验；数据模块返回的 `EvidencePayload.source_id` 也必须与本次实际参数来源一致。
 
 工具 schema 中的 `$ref`、`$dynamicRef` 和 `$recursiveRef` 必须是以 `#` 开头的本地引用，禁止远程引用。`source_id_paths` 使用非根 JSON Pointer，只能沿 schema 中标为 required 的对象字段或上述非空同质数组解析，最终节点必须为 string。来源路径解析支持非递归的本地 `$ref` 指针（`#/...`）；该 `$ref` 节点只允许附带 `description`、`title`、`$comment`，不能带其他结构性兄弟字段。条件或联合 schema 中的来源位置不在当前支持范围内，应拆成独立工具注册。
 
@@ -254,7 +288,7 @@ class DataPort(Protocol):
 - 错误码至少区分 `invalid_args`、`unsupported_format`、`parse_error`、`timeout`、`rate_limited`、`unavailable` 和 `internal`。超时不能作为空证据返回。运行控制器通过 `asyncio.timeout_at(call_deadline)` 对 awaitable 设置基于绝对单调 deadline 的合作式单次 timeout，adapter/SDK 也须配置原生网络 timeout；两层共同减少超时资源残留，但不能强杀忽略取消的 coroutine 或阻塞线程。CPU 密集的解析若需要可控硬截止，应放在可终止的子进程中。数据模块必须把 timeout 表达为 error，不得把部分结果伪装成成功。
 - 文本或表格证据须提供真实来源定位和 `source_id`；无法精确定位时给出文件级定位与 warning。裁剪时设 `truncated=true`。
 - 数据模块应遵守 `max_output_bytes`；运行控制器也会拒绝超出上限的响应。已接受的完整工具结果与规划器的有界预览另行管理，不能把预览大小当作响应大小上限。
-- `data` 允许包含 schema、查询结果等其他 JSON 字段。`extract` 必须提供 `data.evidence` 数组；其他工具可以省略该字段，或返回空数组而只产生工具观察。若提供了 `data.evidence`，必须是有效的 `EvidencePayload[]`，不能用任意工具输出代替证据。
+- `data` 允许包含 schema、查询结果等其他 JSON 字段。工具可以省略 `data.evidence`，或返回空数组而只产生工具观察。若提供了 `data.evidence`，必须是有效的 `EvidencePayload[]`，不能用任意工具输出代替证据。
 - 数据模块返回的每条 `EvidencePayload` 调用时必填 `source_id`、`content_type`、`payload`、`locator`；`warnings` 可省略，默认 `[]`。evidence ID 由运行控制器生成，格式对调用方不透明、在单个 run 内唯一，并在传给内容模块前补成 `EvidenceRecord`（再附 `evidence_id` 和 `call_id`）；数据模块不生成 evidence ID。locator 必须指向实际页码、行列、JSON 路径或文本位置，不能由模型补造。
 - 运行控制器校验每条 `EvidencePayload.source_id` 属于当前目录快照且与本次工具参数相符，再生成 run-scoped evidence ID。运行控制器/内容模块不解析或推断数据模块的 locator。
 
@@ -301,7 +335,7 @@ class DataPort(Protocol):
 }
 ```
 
-错误时 `status="error"`、`data=null`，`error` 含 `code/message/retryable`。运行控制器按调用预算累计内容模块的用量；内容模块不必自行决定是否重试。`search` 没有候选源时以 `status="ok"` 返回空 `candidates`。实际 provider 请求在失败前已产生的 usage 仍需返回；纯本地检索或索引未发 provider 请求时 token usage 为 0，无法测量时为 null。
+错误时 `status="error"`、`data=null`，`error` 含 `code/message/retryable/recoverable`，可另含 `details` 诊断。运行控制器按调用预算累计内容模块的用量；内容模块不必自行决定是否重试。`search` 没有候选源时以 `status="ok"` 返回空 `candidates`。实际 provider 请求在失败前已产生的 usage 仍需返回；纯本地检索或索引未发 provider 请求时 token usage 为 0，无法测量时为 null。
 
 单次 `ModuleResult.usage` 固定包含 `input_tokens`、`output_tokens`（非负整数或 null）、`cost`（非负数或 null）、`currency`（string/null）和 `provider_requests`（0 或 1）。未发 provider 请求的本地实现必须显式回报 `provider_requests=0`、`input_tokens=0`、`output_tokens=0`；使用本库模型时应传 `Usage.local()`。等价 JSON 为 `{"input_tokens": 0, "output_tokens": 0, "cost": null, "currency": null, "provider_requests": 0}`。实际发起 provider 请求时回报 `provider_requests=1`，包括已发起但失败的请求；未知 token/费用保持 null。若遗漏 `provider_requests`，当前模型按 1 保守计数（fail-closed），不能依靠两个 token 字段为 0 推断没有请求。`prepare_catalog`/`search` 必须回报 0；若回报 1，运行控制器保留该调用消耗并以 `failed/invalid_module_response` 拒绝。
 
@@ -331,7 +365,7 @@ class ContentPort(Protocol):
 
 ### `search`（运行控制器 → 内容模块）
 
-该本地检索调用只带 `CallContext`，输入数据含原问题、当前子任务及其 `search_query`、`catalog_snapshot_id`、`catalog_handle`、已访问 `source_id`、`source_id_filter`（可为 null）、`limit`。验证器的 `search_more`/`query_again` 若带 `focus.source_ids`，运行控制器将其作为过滤条件；运行控制器先校验这些 ID 都属于当前目录快照。`limit` 不得大于 `candidate_top_k`。内容模块必须确认 handle 对应给定快照；运行控制器校验候选的 `source_id` 属于该完整目录及过滤集合（若提供）。`search` 不调用模型，usage 中 token 记为 0。
+该本地检索调用只带 `CallContext`。A/C 请求字段保持原样：原问题、`subtask`（含当前查询 `search_query`）、`catalog_snapshot_id`、`catalog_handle`、已访问 `source_id`、`source_id_filter`（可为 null）、`limit`。控制器把模型 `search` 动作的 query 放入既有 `subtask` 字段；它是本次检索的兼容封装，不要求模型先拆分任务。source_ids 由模型动作选择并映射到 source_id_filter，运行控制器先校验其属于目录；显式空数组表示空范围，null 表示整个目录。`limit` 不得大于 `candidate_top_k`。内容模块必须确认 handle 对应给定快照；运行控制器校验候选的 `source_id` 属于该完整目录及过滤集合（若提供）。`search` 不调用模型，usage 中 token 记为 0。
 
 输出数据：`candidates` 不超过请求的 `limit`，`source_id` 不重复，`score` 是有限的 0–1 排序分数；无结果返回空数组。
 
@@ -347,7 +381,18 @@ class ContentPort(Protocol):
 
 ### `compose`（运行控制器 → 内容模块）
 
-除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、已完成子任务摘要、带定位的 `EvidenceRecord[]`。当前 `token_budget.max_output_tokens_this_call` 为 null，不构成输出 token 上限；未来启用该上限时，内容模块不得覆盖或扩大其非 null 值。
+除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、`completed_subtasks` 和带定位的 `EvidenceRecord[]`。completed_subtasks 是可选计划中由模型标记完成的摘要，可以为空；evidence 也可以为空，用于目录说明、澄清或资料不足说明。正文事实不得超出实际可用输入，不能编造引用。当前 `token_budget.max_output_tokens_this_call` 为 null，不构成输出 token 上限；未来启用该上限时，内容模块不得覆盖或扩大其非 null 值。
+
+`ComposeRequest.revision: AnswerRevision | None` 是默认空的增量字段，None 时序列化省略；首次生成继续接收原有业务字段。有旧答案时，控制器发送以下修订信息，使无状态 C 不必依赖内部会话：
+
+| revision 字段 | 含义 |
+|---|---|
+| `previous_answer` | 当前完整已接纳 AnswerRecord，包含正文、引用、未解决问题和结构化结果 |
+| `verification` | 针对该答案保存的核验意见，可为 null；不是输出格式错误的 ContentFeedback |
+| `verification_is_current` | 核验是否仍适用于当前完整可信输入；无核验时必须 false |
+| `instructions` | planner 的可选修订目标，非空时为1–4000字符 |
+
+这些数据不替代 question 或 evidence，不具有授权、预算或修改 require_verification 的效力；历史核验过期时只能当作历史参考。控制器不把失败核验伪装成 EvidenceRecord。C 必须把 revision 内容放进提供方的 messages，并遵守当前完整证据与运行契约。本文只描述仓库已实现的隔离内容适配器，外部真实 C 需要升级共享模型和实际模型消息构造，不因 Python 多了字段就自动支持。旧版 extra=forbid 消费者会拒绝非空 revision，应先升级再联调；不静默丢弃修订数据。
 
 输出 `AnswerRecord`：
 
@@ -366,6 +411,8 @@ class ContentPort(Protocol):
 
 除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、当前 `AnswerRecord`、本次回答可见的 `EvidenceRecord[]`。
 
+控制器将合法核验结果绑定到实际传入的完整问题、完整 AnswerRecord、完整有序 EvidenceRecord 列表和运行政策（mode、require_verification）的确定性指纹。比较依据是可信运行状态，不是 planner context 中的摘要或截断预览。指纹不纳入新时间戳、attempt ID 或审计事件顺序；同一运行重放保存的请求/响应可重建相同适用状态。
+
 输出数据：
 
 ```json
@@ -379,82 +426,79 @@ class ContentPort(Protocol):
 }
 ```
 
-`verdict` 为 `supported`、`insufficient`、`conflicting` 或 `invalid_citation`；`recommendation.action` 为 `none`、`compose_again`、`search_more`、`query_again` 或 `stop`。`focus` 给出目标 `subtask_id`、可执行的搜索词、来源或缺失字段；`search_more`/`query_again` 必须提供 focus，且必须指定已存在的目标子任务。内容模块只提出建议；运行控制器检查反馈轮数和预算后决定是否执行。验证超时或错误绝不能解释为 `supported`。
+`verdict` 为 `supported`、`insufficient`、`conflicting` 或 `invalid_citation`；`recommendation.action` 为 `none`、`compose_again`、`search_more`、`query_again` 或 `stop`。`focus` 给出建议标识 `subtask_id`、查询、来源或缺失字段。为保持 C 的既有请求/响应结构，`search_more`/`query_again` 仍须提供 focus 和非空 subtask_id；该标识不要求来自模型的可选计划，也不触发自动子任务重访。控制器校验引用及目录来源后，把完整建议作为下一轮模型观察。内容模块不决定动作路由，验证超时或错误绝不能解释为 supported。
 
-## 5. 规划器输出
+### 内容输出诊断与显式修正扩展
 
-规划器是运行控制器的内部适配器，不要求数据模块/内容模块实现。它也接收统一调用封套，并使用同一模型调用/时间预算。公开的内部适配为：
+`ErrorInfo.details: JsonObject | None` 是可选的有界 JSON 诊断；None 时序列化省略该字段。内容输出校验可记录 `issues[].path/code/actual/expected`、允许的证据/来源 ID 预览、`rejected_output` 和 `omitted`。path 使用 JSON Pointer；详情最大8000字节，还受单次响应总大小限制，省略项不能作为完整授权集合。不得在诊断中写 HTTP 鉴权、私有连接封装或任意原始异常文本。
+
+C 只有声明 `content_feedback_protocol = CONTENT_FEEDBACK_PROTOCOL`（精确值 `"content-feedback-v1"`）后才会收到扩展请求：`ComposeFeedbackRequest(ComposeRequest)`、`VerifyFeedbackRequest(VerifyRequest)` 各增加必填 `feedback: ContentFeedback`。反馈含此前同阶段的 `phase/call_id/error`。这与 ComposeRequest 中默认空的 revision 是不同扩展：revision 传递旧答案及合法核验意见，feedback 传递非法输出的诊断。未声明能力的模块不接收 feedback 字段；旧的 extra=forbid 消费者仍需升级共享修订模型，若还需输出错误纠正，再实现反馈处理并声明能力。未知声明不构成支持。
+
+显式支持后，`invalid_model_citations`、`invalid_model_sources`、`invalid_model_output` 这些已知模型输出错误可交回 decide。控制器也校验 status=ok 响应中的引用；拒绝输出不覆盖有效答案或核验，未解决反馈使 finish 返回 `unresolved_content_failure` 拒绝观察。同阶段输出成功清除反馈；接纳不同的新答案时，另外清除针对旧答案的 verify 输出反馈与核验收据，相同答案不能借此清除原状态。模型继续自由选择动作。
+
+规划模型通过既有 context 接收反馈，内容模型则通过扩展请求接收；二者不共享隐式聊天历史。C 应把动态 feedback 放进提供方的 `messages[].content`，不新增 HTTP 顶层参数、不改原 question、不伪造 evidence。每个内容调用仍最多一个模型请求；修正是新的受预算调用，不由 adapter 内部循环重试。HTTP/鉴权/传输/超时/提供方封装与端口契约错误维持终止，旧模块也不因 retryable/recoverable 标志就获得内容纠错能力。完整样例见[内容反馈说明](content-feedback.md)。
+
+## 5. 统一规划器请求与动作
+
+规划器属于 B 内部适配器，A/C 无需实现。唯一端口为：
 
 ```python
-class PlannerPort(Protocol):
-    async def decompose(self, request: PlannerRequest) -> ModuleResult[TaskPlan]: ...
-    async def select_tools(self, request: ToolPlanningRequest) -> ModuleResult[ToolPlan | FinishDecision | ReadObservationDecision]: ...
+class AgentPlannerPort(Protocol):
+    agent_protocol: str  # 必须为 "agent-loop-v1"
+
+    async def decide(self, request: AgentDecisionRequest) -> ModuleResult[AgentAction]: ...
 ```
 
-每个规划器请求都含 `CallContext`、`ModelCallContext`，以及以下阶段字段。`budget_remaining` 固定为非负整数对象：`wall_time_ms`、`model_calls`、`data_calls`、`plan_steps`、`subtasks`；其 token 字段放在 `ModelCallContext.token_budget` 中。这里的 `budget_remaining.data_calls` 与 `RunConfig.max_data_calls` 共用同一剩余额度，等于上限减去已预留的 DataPort.catalog/DataPort.invoke 物理调用次数。运行控制器在调用前算出余量；adapter 不得自行增加预算。
+`AgentDecisionRequest` 包含 `ModelCallContext` 以及以下业务输入：
 
-| 类型 | 规范化字段与约束 |
+| 字段 | 含义 |
 |---|---|
-| `PlannerRequest` (`decompose`) | `question`、`catalog_snapshot_id`、`tool_specs[]`、`budget_remaining` |
-| `TaskPlan` | `{ "subtasks": Subtask[] }`；至少一个，最多 `max_subtasks` 个 |
-| `Subtask` | `subtask_id`、`objective`、`search_query` 调用时必填；`required_evidence[]`、`depends_on[]` 默认 `[]`；ID 在 run 内唯一，依赖必须存在且无环 |
-| `ToolPlanningRequest` (`select_tools`) | `question`、单个 `subtask`、`candidates[]`、`evidence_summary[]`、`tool_observations[]`、`context_status`、`observation_read`（可为 null）、`verifier_focus`（可为 null）、完整 `tool_specs[]`、`budget_remaining`；新增上下文字段默认分别为 `[]`、`{}`、null |
-| `ToolPlan` | `{ "kind": "actions", "steps": ToolStep[] }`；kind 默认 `actions`；steps 调用时必填且非空，数量不得大于 `budget_remaining.plan_steps` |
-| `ToolStep` | `step_id`、`subtask_id`、`tool_name`、`source_ids[]`、`args`、`purpose` 调用时必填；`depends_on[]` 默认 `[]`；ID 在 run 内唯一，依赖只可引用同一份 `ToolPlan` 中的步骤 |
-| `FinishDecision` | `{ "kind": "finish", "reason": "evidence_complete" | "insufficient_evidence" | "not_applicable" }`；kind 默认 `finish`，reason 调用时必填 |
-| `ReadObservationDecision` | `{ "kind": "read_observation", "observation_id": string, "pointer": string, "offset": integer, "max_chars": integer }`；observation_id 调用时必填，kind 默认 `read_observation`，pointer 默认空字符串，offset 默认 0，max_chars 默认 2000、范围 1–4096 |
+| `question` | 原始问题 |
+| `catalog_snapshot_id` | 当前完整目录的冻结身份 |
+| `tool_specs` | 数据模块的可信工具声明；模型不能覆盖权限 |
+| `budget_remaining` | 非负整数 `wall_time_ms/model_calls/data_calls/plan_steps/subtasks` |
+| `context` | 有界目录、候选、观察、证据、可选计划、当前答案、核验与动作反馈 |
+| `remaining_turns` | 此次决策前剩余轮数，受 max_agent_turns 限制 |
+| `require_verification` | 宿主是否要求当前答案通过核验后完成 |
 
-`PlannerRequest` 和 `ToolPlanningRequest` 的完整字段含义：`decompose` 接收原问题、目录快照 ID、可用工具 schema 摘要和预算余量；`select_tools` 接收原问题、一个子任务、候选来源、有界工具观察与证据摘要、可选读取页、验证器 focus、完整可用工具 schema 和预算余量。运行控制器用共享严格模型校验结构，并以本地 Draft 2020-12 工具 schema 校验参数，再检查授权、依赖和预算。`JsonPlanner` 使用 provider JSON object 模式与本地输出类型校验；动态工具参数不一定符合各 provider 的 strict schema 子集，因此不宣称 provider 端 strict schema 保证。输出形状固定如下：
+控制器在调用前计算余量。`data_calls` 等于上限减去已预留的目录/工具物理调用；不得由适配器增加。token 预留字段继续放在 ModelCallContext.token_budget，当前仅接受 null。JsonPlanner 仅向 provider 发送上述七项业务输入，运行 ID 等不透明关联身份保留在本地封套。
 
-1. `decompose` 返回 `subtasks[]`，每项含唯一 `subtask_id`、`objective`、`search_query`、`required_evidence` 和 `depends_on[]`。
-2. 运行控制器对每个就绪子任务调用 ContentPort.search，再让 `select_tools` 根据该子任务、候选来源、工具观察、现有证据、验证器 focus、数据模块的工具 schema 和预算余量返回动作。`steps[]` 每项含唯一 `step_id`、`subtask_id`、`tool_name`、显式 `source_ids[]`、JSON `args`（需引用来源的数据模块工具也必须在参数中带 source ID）、`depends_on[]` 和一句用途说明。所引用的来源必须是当前目录快照且属于该子任务候选来源，或其 `source_id` 已存在于本 run 的 `EvidenceRecord` 或已接受工具观察的授权来源中。这样，inspect 成功但未产生证据、或下次搜索省略已访问来源时，仍可对同一授权来源继续查询；授权不能从工具正文中新造。`ToolStep.depends_on` 只表达同一份 `ToolPlan` 内的步骤依赖；跨计划或跨子任务顺序由 `Subtask.depends_on` 表达。
-3. `FinishDecision` 含 `kind="finish"` 和 `reason`（`evidence_complete`、`insufficient_evidence` 或 `not_applicable`）；它只表示当前无需再取证，运行控制器仍负责调用 compose 或按证据不足结束。最终答案由 ContentPort.compose 生成，规划器不生成用户答案，也不能直接调用工具或自行修改预算/状态。
-4. `ReadObservationDecision` 请求读取本 run 已有工具观察的一页，读取结果在下一次 `select_tools` 的 `observation_read` 中返回；这不是数据工具动作，也不产生证据。
+动作是以 kind 区分的严格联合类型，详见本文开头的动作表；未知 kind、额外字段或类型错误均不被静默修正。
 
-运行控制器校验子任务数不超过 `budget_remaining.subtasks`、step ID 唯一、依赖存在且无环；参数必须符合数据模块注册的 schema，且 `source_id_paths` 提取的来源集合必须与 `ToolStep.source_ids` 一致并在允许范围内；未知工具、越权来源、无效依赖均以 `failed/invalid_plan` 结束。所有步骤必须整体验证通过，才能接受计划、提交 step ID 或派发第一批工具；后面的非法步骤不能导致前面的合法步骤先执行。若 `steps` 数量大于 `budget_remaining.plan_steps`，整份动作计划不执行，以 `budget_exceeded/step_budget` 结束，不截断计划。规划器/内容模块不自动修复格式或隐式重试；显式增加一次规划器请求时须单独计数。日志只记计划字段和动作，不记录私有推理全文。
+- `tools.steps` 每项是 AgentToolStep，包含唯一 step_id、tool_name、显式 source_ids、args、purpose 及默认空 depends_on；不要求 subtask_id。依赖只可引用同一动作中的步骤，必须无环。所有步骤整体验证后才提交 ID 或派发第一批；后面的非法步骤不能让前面的合法步骤先执行。
+- 工具参数须符合本地 Draft 2020-12 schema，参数路径提取的来源集合须精确等于 source_ids，并全部属于完整冻结目录。模型可以直接选择目录中来源，不要求先搜索。
+- `plan` 只替换可选 subtasks 和 completed_subtask_ids，可为空。Subtask 的 subtask_id/objective/search_query 必填，required_evidence/depends_on 默认空数组；计划 ID 唯一、依赖存在且无环。完成 ID 必须属于本次计划。它记录工作进展，不建立固定的工具执行顺序。
+- 超出剩余工具步骤的动作整体以 budget_exceeded/step_budget 停止，不截断后执行。执行动作、观察读取及内容调用都仍消耗各自时间和调用预算。
+- `compose` 通过 C 生成或修订答案，可带默认空的 revision_instructions（1–4000字符），控制器把它放入 revision.instructions。没有旧答案却请求修订时，返回 revision_answer_required 拒绝观察且不调用 C；普通首次 compose 不受影响。
+- `finish` 是提交已有答案的完成提议，不替模型自动生成答案；最终是否接受由控制器按当前政策判断。无答案 finish/verify 作为拒绝反馈返回模型，允许下一轮修正。
 
-`TaskPlan` 示例：
-
-```json
-{
-  "subtasks": [
-    {"subtask_id": "subtask-1", "objective": "Find the reported annual revenue", "search_query": "annual revenue", "required_evidence": ["value", "year", "source location"], "depends_on": []}
-  ]
-}
-```
-
-无更多取证计划时的 `FinishDecision` 示例：
-
-```json
-{"kind": "finish", "reason": "insufficient_evidence"}
-```
-
-`select_tools` 成功样例（外层为 `ModuleResult`）：
+一个合法工具动作响应：
 
 ```json
 {
   "schema_version": "1.0",
-  "call_id": "plan-tools-2-attempt-1",
+  "call_id": "decide-2-attempt-1",
   "status": "ok",
   "data": {
-      "kind": "actions",
-      "steps": [
-      {
-        "step_id": "step-2",
-        "subtask_id": "subtask-1",
-        "tool_name": "extract",
-        "source_ids": ["src-18"],
-        "args": {"source_id": "src-18", "query": "annual revenue", "max_chars": 12000},
-        "depends_on": [],
-        "purpose": "Read the source excerpt relevant to the requested value."
-      }
-    ]
+    "kind": "tools",
+    "steps": [{
+      "step_id": "read-report",
+      "tool_name": "extract",
+      "source_ids": ["src-18"],
+      "args": {"source_id": "src-18", "query": "annual revenue", "max_chars": 12000},
+      "depends_on": [],
+      "purpose": "Read the requested annual value."
+    }]
   },
   "error": null,
   "usage": {"input_tokens": null, "output_tokens": null, "cost": null, "currency": null, "provider_requests": 1},
   "duration_ms": 930
 }
 ```
+
+可选计划示例为 `{"kind":"plan","subtasks":[],"completed_subtask_ids":[]}`；最终提交为 `{"kind":"finish"}`；无法继续为 `{"kind":"stop","reason":"说明尚缺少的资料"}`。模型决定这些动作何时发生，控制器决定执行是否获准。日志记录动作及公开状态，不记录私有推理全文。
+
+JsonPlanner 使用 provider JSON object 模式与本地严格类型校验；动态工具参数未必能由每家 provider 的 strict schema 子集表示，因此不宣称 provider 端严格 schema 保证。它不自动修复格式或重试，单次 decide 至多发一个请求。
 
 ### 5.1 完整工具观察与引用证据
 
@@ -464,11 +508,13 @@ class PlannerPort(Protocol):
 
 ### 5.2 有界工作上下文与完整请求限制
 
-`select_tools` 的 `evidence_summary`、`tool_observations`、`context_status`、`observation_read` 四字段一起按规范化 JSON 的 UTF-8 字节数计量，合计不得超过 `max_planner_context_bytes`。工具观察投影保留稳定标识及 provenance，对参数、data、error、warnings 等大字段生成可识别的预览。小值保留结构，大值用包含 `truncated`、`text`、`total_bytes` 的对象表示；标识无法完整容纳时省略整条记录，不编造缩短后的 ID。
+完整 `AgentDecisionRequest.context` 按规范化 JSON 的 UTF-8 字节数计量，不得超过 max_planner_context_bytes。上下文包括目录/候选、计划、答案/核验、最近动作、观察与证据预览和分页结果。小值保留结构，大值用带 truncated/text/total_bytes 的对象显式预览；ID 无法完整容纳时省略整项，不编造缩短后的 ID。
 
-装箱先尝试当前子任务最近的观察和最近证据，再依确定顺序尝试更早条目；超出时缩小预览或省略条目。`context_status.observations` 与 `.evidence` 分别记录 `total/included/omitted`，另有 `unknown_fields_omitted`，空间允许时提供 `remaining_observation_reads`。裁剪和省略不证明原始结果不存在某个字段。完整结果与证据继续保存在 run 状态和 artifact 中。
+context_status.observations/evidence 记录 total/included/omitted，omitted_fields 记录整字段省略。按确定顺序优先尝试最近的工具观察和证据；分页生成前预留未解决反馈的阶段/调用ID/错误码，紧随读取的决策保留完整 text/next_offset，其他预览和更老 previous_pages 可让出空间。后续动作产生新反馈时，旧页面可通过 omitted_fields 明确省略。裁剪或省略不证明原始结果不存在该字段。完整结果、证据与审计文件继续保留。
 
-此四字段上限不包含 question、subtask、candidates、tool_specs、验证器 focus、系统提示词、输出 schema 或 HTTP 封装。`JsonPlanner(max_request_bytes=256000)` 在派发前另行限制完整序列化 HTTP JSON 请求体（包含系统/用户消息及输出 schema），超限返回 `planner_input_too_large` 且 `usage.provider_requests=0`。请求正常派发后仍按 0/1 provider 用量结算。两层限制均为字节边界，不是模型 token 或上下文窗口保证，也不限制 `compose`/`verify` 的完整证据输入。
+当完整工具观察预览装不下时，构造器会在剩余预算内尝试保留带 preview_omitted=true 的最小索引：完整 observation_id、tool_name、source_ids 和 status。该索引不含被省略的结果正文，模型可用 read_observation 读取；若连索引也无法容纳，仍由 context_status.observations.omitted 明示省略。上述预览处理不改变控制器保存的完整状态或核验指纹。
+
+此上限不包含 question、tool_specs、系统提示词、输出 schema 或 HTTP 封装。JsonPlanner(max_request_bytes=256000) 在派发前另限完整序列化 HTTP JSON 请求体；超限返回 planner_input_too_large 且 usage.provider_requests=0。两层均是字节边界，不是模型 token/context-window 保证，也不限制 compose/verify 所需的完整证据输入。
 
 ### 5.3 本地观察分页读取
 
@@ -480,17 +526,20 @@ class PlannerPort(Protocol):
 
 成功读取页含 `observation_id`、`pointer`、`offset`、`text`、`next_offset`、`total_chars` 和 `truncated`。`text` 可能只是部分 JSON，规划器应按 `next_offset` 继续，不能把单页当成完整 JSON 或原始字符串。每页先持久化，再记录 `observation.read`，并增加 `call_counts.observation_reads`。无效 ID、pointer、越界 offset 或无法在字节预算内返回的页以 `failed/invalid_observation_read` 停止；已用完 `max_observation_reads` 时以 `budget_exceeded/observation_read_budget` 停止。
 
-由于规划器 HTTP 请求不保存会话，下一轮的 `observation_read` 除最新页外，在最多半个 `max_planner_context_bytes` 内保留本子任务连续读取阶段的最近 `previous_pages`，并以 `omitted_pages` 记录已移出上下文的页数。新工具计划执行后清空此段读取历史；完整观察与审计页不因此删除。读取本身不调用 `DataPort` 或 provider，不消耗 `max_data_calls`、`max_model_calls` 或 `max_plan_steps`；为产生读取决策和消费返回页而进行的规划器请求仍正常占用模型/时间预算。
+规划器 HTTP 请求不保存会话，下一轮 context.observation_read 除最新页外，在有界空间保留连续读取阶段的最近 previous_pages，并以 omitted_pages 记录已移出上下文的页数。新工具动作执行后清空该读取历史；完整观察与审计页不因此删除。当前已请求页不再二次截断，next_offset 保持与实际 text 一致。读取本身不调用 `DataPort` 或 provider，不消耗 `max_data_calls`、`max_model_calls` 或 `max_plan_steps`；为产生读取决策和消费返回页而进行的规划器请求仍正常占用模型/时间预算。
 
-## 6. 模式、状态和重试语义
+## 6. 运行策略、状态和重试语义
 
-| 模式 | 运行策略 |
+生产 RunRequest.mode（运行模式）与 EvaluationMode（报告中的实验组）分别管理，不能把实验组直接作为生产模式派发。
+
+| 生产运行模式 | 行为 |
 |---|---|
-| `fixed_retrieval` | 运行控制器先调用一次本地 ContentPort.prepare_catalog，再由本地 ContentPort.search 对原问题搜索一次；按得分取固定 top-k，为每个来源建立 `extract` 步骤（`source_id`、原问题、`fixed_extract_max_chars`），按同一受控并行规则执行；未声明安全并行的 extract 保持串行。没有候选或抽取结果全为空时分别以 `no_candidates`/`no_evidence` 结束，不调用 compose；有证据时由 ContentPort.compose 生成一次回答。不调用规划器/验证器，不根据反馈追加步骤。模型版本、采样配置、top-k 和抽取长度必须写入实验配置。 |
-| `no_verifier` | 执行规划器、搜索、数据模块工具和 compose；跳过 verify 与验证反馈重规划。 |
-| `full_agent` | 在 `no_verifier` 流程上加入 verify；只在反馈轮数、调用和时间预算允许时按内容模块的结构化建议补证据并重新回答。 |
+| `full_agent` | 同一个自由动作循环，允许模型选择核验；日常默认 require_verification=false |
+| `no_verifier` | 同一个自由动作循环，verify 被拒绝；不允许 require_verification=true |
 
-子任务状态为 `pending → ready → running → succeeded/failed/blocked/skipped`。`max_subtasks` 限制 TaskPlan 大小；`max_plan_steps` 和 `call_counts.steps` 都只计算实际派发的 DataPort.invoke 逻辑操作。DataPort.catalog/DataPort.invoke 每次物理尝试共用 `max_data_calls`；规划器/内容模块的模型请求受 `max_model_calls` 限制，本地 ContentPort.search/prepare_catalog 不消耗该预算。调用方可并发运行不同 `run_id`，但须限制总并发并确保 adapter 实例可重入。
+离线 `tests/support/ablation.py` 的 EvaluationMode 有 fixed_retrieval/no_verifier/full_agent 三组。固定 top-k 仅由评估侧本地规划器提出 search/tools/compose/finish 动作，不存在生产固定检索分支；其执行封套使用 no_verifier。评估 full_agent 明确设 require_verification=true，no_verifier 与固定组设 false。实验必须使用同一任务、冻结快照、基础模型/采样及公开预算；评估标签仅在执行结束后用于评分，不能传入执行端口。
+
+max_subtasks 只约束可选计划大小；max_plan_steps 与 call_counts.steps 只计算实际派发的工具逻辑操作。目录/工具物理尝试共享 max_data_calls，provider 请求共享 max_model_calls，本地 prepare_catalog/search 不耗 provider 额度。每次 decide 还消耗一轮 max_agent_turns，因此零提供方用量的本地决策不能无限循环。不同 run 可以并发，但宿主须限制总并发并确保共享适配器可重入。
 
 ### 6.1 有界工具批次与稳定提交
 
@@ -509,46 +558,49 @@ class PlannerPort(Protocol):
 重试规则：
 
 - `max_retries_per_data_operation` 只适用于 DataPort.catalog/DataPort.invoke，表示首次调用之外最多额外尝试次数；采用有上限的指数退避加 full jitter，实际等待时间写入 trace 并服从全局 deadline。DataPort.catalog 是只读幂等操作；DataPort.invoke 仅当对应 `ToolSpec.idempotent=true` 时可自动重试。两者还必须满足 `error.retryable=true`。目录页重试保持相同 `operation_id`、快照和 cursor，使用新的 `call_id` 并递增 `attempt`；快照不匹配属于不可重试错误。每次物理尝试都消耗一次 `max_data_calls`。
-- 规划器/内容模块不自动重试；格式修复必须作为新的规划器请求单独计数。数据模块的 per-call timeout 可按既有规则仅对幂等操作且 `error.retryable=true` 的操作重试；达到 run deadline 时立即以 `timeout/time_budget` 结束。单次 timeout 已耗尽且不能重试时以 `timeout/call_timeout` 结束。已派发后被取消或超时的工具调用结果视为未知；不得记录为成功，只有幂等且标记 retryable 的操作才可重试。
+- 规划器/内容模块不自动重试；支持 `content-feedback-v1` 的内容输出修正先回 decide，再由模型选择新的内容调用，各自计数。数据模块的 per-call timeout 可按既有规则仅对幂等操作且 `error.retryable=true` 的操作重试；达到 run deadline 时立即以 `timeout/time_budget` 结束。单次 timeout 已耗尽且不能重试时以 `timeout/call_timeout` 结束。已派发后被取消或超时的工具调用结果视为未知；不得记录为成功，只有幂等且标记 retryable 的操作才可重试。
 - 工具重试保持原 `operation_id`，使用新 `call_id` 和递增 `attempt`；每次物理意图重新占用数据额度。待重试操作按剩余物理预算拆成可完整准备的有界小批；预算不足时不先准备全部重试，更不超额派发。内部重试不重复增加逻辑 `steps` 或重复动作签名计数；`retries` 仅在额外尝试实际进入 adapter 后增加。若同批存在最终失败决定，停止其余尚未派发的重试并先结算已启动同伴。
-- 验证器的 `insufficient`/`conflicting` 属于业务反馈，触发重新规划，不是对同一调用的重试。每次尝试都消耗调用预算并记录独立 `call_id`；adapter/SDK 不得再做隐式重试。
+- 验证器的 `insufficient`/`conflicting` 属于业务反馈，交回模型决定下一动作，不是对同一调用的重试。每次尝试都消耗调用预算并记录独立 `call_id`；adapter/SDK 不得再做隐式重试。
 
-工具错误恢复与重试分开结算。只有可信数据 adapter 返回有效的 `ToolResult(status="error", error.recoverable=true)`，声明该操作已明确失败、可安全修正输入，且既有重试规则已不再派发额外尝试时，`no_verifier`/`full_agent` 才接受错误观察并进入下一轮规划。可重试且幂等的操作先按重试额度执行；耗尽后若最后一次有效错误仍可恢复，才转入重新规划。恢复不要求 `idempotent=true`，因为它是新的决策，不是重放未知副作用；adapter 不得把未知结果标记为 recoverable。此路径不消耗验证反馈轮数，但新规划请求、新工具动作和时间照常计入各自预算。`fixed_retrieval` 不启用错误恢复。
+工具错误恢复与重试分开结算。只有可信数据 adapter 返回有效的 `ToolResult(status="error", error.recoverable=true)`，声明该操作已明确失败、可安全修正输入，且既有重试规则已不再派发额外尝试时，`no_verifier`/`full_agent` 才接受错误观察并进入下一轮规划。可重试且幂等的操作先按重试额度执行；耗尽后若最后一次有效错误仍可恢复，才转入重新规划。恢复不要求 `idempotent=true`，因为它是新的决策，不是重放未知副作用；adapter 不得把未知结果标记为 recoverable。新的 decide、工具动作、轮数和时间照常计入各自预算，不存在独立固定反馈循环额度。
 
-`recoverable` 不覆盖停止规则：授权/权限错误、timeout/provider timeout、schema/响应/工具契约违规、token 预算错误即使错误标记为 true 也不能恢复；运行控制器的校验失败、adapter 异常、网络异常与未知执行结果也不能通过此字段进入重新规划。`recoverable=false` 时沿用既有 `tool_error`/`retry_exhausted` 等终止语义。错误本身不进入证据集合。
+工具的 `recoverable` 不覆盖停止规则：授权/权限错误、timeout/provider timeout、schema/响应/工具契约违规、token 预算错误即使错误标记为 true 也不能恢复；运行控制器的工具校验失败、adapter 异常、网络异常与未知执行结果也不能通过此字段进入重新规划。`recoverable=false` 时沿用既有 `tool_error`/`retry_exhausted` 等终止语义。第4节的内容输出修正采用独立的能力声明与错误类别判断，不放宽这些工具规则；错误本身不进入证据集合。
 
 每次工具派发前，以 `[subtask_id, tool_name, args]` 的规范化 JSON 计算重复动作签名，按 run 累计；step ID、purpose 和参数键顺序不会改变签名。默认允许 2 次相同逻辑动作，第 3 次在派发前记录 `tool.loop_detected`，将本步骤标记 `skipped`、依赖步骤标记 `blocked`、其余步骤标记 `skipped`，并以 `failed/repeated_tool_call` 停止，不新增该动作的 DataPort 调用或逻辑步骤计数。同一次逻辑动作的内部重试只计算一次重复动作次数，但每次物理尝试继续消耗 `max_data_calls`。
 
 调用方取消当前 run 时，运行控制器不把 `asyncio.CancelledError` 转成 `RunResult`、模块错误或可重试错误。控制器先取消并等待全部所属工具 worker，观察每个子任务结果并结算实际派发计数，再在独立 `cancel_cleanup_timeout_ms` 上限内，以 shielded cleanup 尽力追加 `run.cancelled` 事件并关闭 trace 后重新抛出；trace 清理超时或失败时放弃清理并保留原始取消。合作式 worker 的观察完成先于 trace 关闭，但不能用该 trace 清理上限强杀不配合取消的 adapter。取消前已提交或提交结果未知的 `*.call.started` 物理尝试仍消耗调用预算，即使 adapter 尚未真正发出底层请求也不退还；未派发的首尝试和重试分别不增加逻辑 `steps` 与 `retries`。`CancelledError` 与 `asyncio.timeout_at()` 产生的 timeout 分开处理。trace sink 在取消或进程被强制终止时可能无法写完最后事件，因此 `run.cancelled` 是尽力记录而非持久性保证。
 
-`RunResult.status`：`completed`、`insufficient_evidence`、`budget_exceeded`、`timeout`、`failed`。`completed` 只表示流程产出答案，不代表 benchmark 正确。`answer` 在 `completed` 时必填；其余状态可保留最后一个 citation 已校验的答案，若尚无则为 null。状态与 `stop_reason` 映射固定如下：
+`RunResult.status`：`completed`、`insufficient_evidence`、`budget_exceeded`、`timeout`、`failed`。`completed` 表示控制器按当前运行政策接受了模型的完成提议；运行完成、内部核验通过、外部评测正确是不同概念，均不能互相替代。未核验的完成和 supported 均不是事实正确性的保证。`answer` 在 `completed` 时必填；其余状态可保留最后一个 citation 已校验的答案，若尚无则为 null。状态与 `stop_reason` 映射固定如下：
 
 调用方任务取消会抛出 `asyncio.CancelledError`，不返回上述 `RunResult`；`RunResult` 仅表示 运行控制器自身正常完成、预算停止、超时或失败后的结算结果。
 
 | 条件/stop_reason | status | answer |
 |---|---|---|
-| `verified_supported`（仅 full_agent，verdict supported 且 action none） | `completed` | 必填 |
-| `planner_finished` 且已有证据，经 compose 生成答案；或 `fixed_retrieval_completed`（有证据且已 compose） | `completed` | 必填 |
-| `planner_finished_no_evidence`、`no_candidates`、`no_evidence`、`verifier_stop`、`no_further_action`、`feedback_exhausted` | `insufficient_evidence` | 保留最后的有效答案或 null |
-| `step_budget`、`data_call_budget`、`model_call_budget`、`token_budget`、`catalog_limit`、`observation_read_budget` | `budget_exceeded` | 保留最后的有效答案或 null |
+| `agent_finished`：已有答案，满足当前政策，且没有当前有效的不支持核验或未解决内容错误 | `completed` | 必填 |
+| `agent_stopped`、`agent_verification_failed` | `insufficient_evidence` | 保留最后的有效答案或 null |
+| `agent_turn_budget`、`step_budget`、`data_call_budget`、`model_call_budget`、`token_budget`、`catalog_limit`、`observation_read_budget`、`planner_context_limit`、`catalog_context_limit` | `budget_exceeded` | 保留最后的有效答案或 null |
 | `time_budget`、`call_timeout` | `timeout` | 保留最后的有效答案或 null |
-| `retry_exhausted`（最后错误非 timeout）、`tool_error`、`module_error`、`invalid_plan`、`invalid_module_response`、`invalid_observation_read`、`repeated_tool_call`、`unsupported_token_budget`、`catalog_snapshot_mismatch`、`trace_sink_unavailable`、`trace_write_failed`、`trace_close_failed`、adapter 契约错误 | `failed` | 保留最后的有效答案或 null |
+| `retry_exhausted`、`tool_error`、`module_error`、`invalid_plan`、`invalid_module_response`、`invalid_observation_read`、`invalid_catalog_read`、`repeated_tool_call`、`unsupported_token_budget`、`invalid_planner_protocol`、`invalid_run_policy`、目录/审计/适配器错误 | `failed` | 保留最后的有效答案或 null |
 
-| verdict | 合法 action | 运行控制器的处理 |
+| verdict | 合法 recommendation.action | 控制器行为 |
 |---|---|---|
-| `supported` | `none` | 结束为 `completed/verified_supported`；其他 action 属于 `invalid_module_response` |
-| `insufficient` / `conflicting` | `search_more` / `query_again` / `stop` / `none` | 有 feedback budget 时按 focus 搜索或重选工具；`stop` 或 `none` 时结束为 `insufficient_evidence` |
-| `invalid_citation` | `compose_again` / `stop` | 用同一份证据重新 compose 或以 `insufficient_evidence` 结束；不调用数据模块 |
+| `supported` | `none` | 保存核验，返回下一轮模型决策；不自动结束 |
+| `insufficient` / `conflicting` | `search_more` / `query_again` / `stop` / `none` | 保存失败核验及建议，交回模型；同一答案不能直接 finish 成功 |
+| `invalid_citation` | `compose_again` / `stop` | 保存失败核验及建议，交回模型；实际动作继续经过控制器 |
 
-`focus` 的结构按 action 固定：`search_more` 必须含非空 `subtask_id` 和 `query`，`source_ids` 和 `missing_fields` 可选；`query_again` 必须含非空 `subtask_id`、`query` 及非空 `source_ids[]`，`missing_fields` 可选；`compose_again`、`none`、`stop` 必须令 `focus=null`。内容模块只提供建议字段；运行控制器校验 `subtask_id` 属于本次 TaskPlan，并校验 focus 的来源 ID 属于本次快照，再将其作为目标子任务的 ContentPort.search 可选过滤条件，并通过规划器和数据工具 schema 校验实际调用参数。未知目标 ID 按 `failed/invalid_module_response` 结束。
+C 的现有 focus schema 保持不变：search_more 必须含非空 subtask_id/query，query_again 另需非空 source_ids；compose_again/none/stop 的 focus 必须为 null。控制器校验 issue.evidence_ids 和 focus.source_ids，不强制根据建议重访某个固定子任务。建议中的 none/stop 都不是 supported 的替代证明。
 
-每次验证器返回非终结的 `search_more`、`query_again` 或 `compose_again`，并由运行控制器接受继续动作时，`max_feedback_rounds` 增加 1。`compose_again` 后必须重新调用 verify；`search_more`/`query_again` 完成补证据及重新 compose 后也必须重新 verify。到达上限或其他预算不足时保留最后 citation 已校验的答案，返回 `insufficient_evidence/feedback_exhausted`（若先触发时间、调用或 token 上限则按相应预算状态结束）。`none` 表示内容模块判断无需再采取行动，`stop` 表示内容模块明确建议停止；两者都不能被当作验证器支持答案的证据。
+require_verification=true 时，finish 必须已有当前有效的 supported 核验。旧结果存在但指纹不匹配时返回 agent.action.rejected/verification_stale；缺失核验或当前核验不支持时返回 verification_required，并提供继续 verify 或修订的原因。新增或改变证据、完整答案变化会使旧核验过期；过期不等同于当前答案已被证明不支持。完全相同的再次生成保留相同输入上的失败判定，不能靠重复 compose 清洗。工具、目录读取、搜索或计划操作若没有改变核验相关状态，也不会仅因发生一次调用就使结果过期。
+
+context.verification_status 为 missing/current/stale，独立于有界核验预览；只有 current 时 verification_verdict 才表示当前判定。成功生成不同答案后，控制器清除当前收据，新答案为 missing；答案未变而证据改变时，保留的历史收据为 stale。截断预览无法使旧结果变成 current。require_verification=false 允许缺失或过期核验时完成，但当前有效的不支持核验仍沿用 agent_verification_failed 的停止行为。full_agent 模式本身不启用强制策略，默认值保持 false。SQLite 恢复按原请求/响应重建指纹与修订输入，已保存调用不重复派发，未知结果继续拒绝恢复；本轮源码变化仍受既有实现指纹检查约束，不绕过旧任务兼容性检查。
 
 ## 7. `RunResult` 与轨迹存储（`TraceSink`）
 
 `RunResult` 至少包含：`schema_version`、`run_id`、`task_id`、`mode`、`status`、`stop_reason`、`answer`（无答案时为 null）、累计 `usage`、`call_counts`、`started_at`、`ended_at`、`duration_ms`、`versions` 和 `trace_ref`。trace 是事件的唯一权威来源；不在返回对象里复制第二份事件数组。
 
-`call_counts` 的计数口径固定为：`planner` 是运行控制器→PlannerPort 方法调用次数，`content` 是运行控制器→ContentPort 方法调用次数（包含本地 `prepare_catalog`/`search`），`model_calls` 是按上述保守规则结算的 provider 请求数，`catalog` 与 `tools` 分别统计 DataPort.catalog/DataPort.invoke 的物理尝试及中断时保留的意图预留，`retries` 是实际派发的数据模块额外尝试次数，`steps` 是实际派发的 DataPort.invoke 逻辑步骤数，`observation_reads` 是成功接受的本地观察读取页数。`max_subtasks` 限制计划子任务数，`max_plan_steps` 限制 `steps`；`catalog + tools` 共用 `max_data_calls`，不以并发数倍增额度，`observation_reads` 独立受 `max_observation_reads` 限制。准备了意图但没有实际派发时，不增加 `steps` 或 `retries`。`RunResult.usage.provider_requests` 是全 run 累计的非负整数，可大于 1；累计 token/费用中存在未测量用量时，对应字段保持 null。已知未发生的调用/token 为 0。
+`RunResult.failure` 可空，非空时是 `{phase, call_id, error}`，用于保留最近尚未解决的具体失败；None时序列化省略。预算/时间停止可以同时保留此前内容错误，成功终态不携带残留失败。Web优先使用此字段，旧历史从已有失败事件回退展示；显示推导不改变恢复状态，也不补造旧记录未保存的模型输出。
+
+`call_counts` 的计数口径固定为：`planner` 是运行控制器→AgentPlannerPort.decide 调用次数，`content` 是运行控制器→ContentPort 方法调用次数（包含本地 `prepare_catalog`/`search`），`model_calls` 是按上述保守规则结算的 provider 请求数，`catalog` 与 `tools` 分别统计 DataPort.catalog/DataPort.invoke 的物理尝试及中断时保留的意图预留，`retries` 是实际派发的数据模块额外尝试次数，`steps` 是实际派发的 DataPort.invoke 逻辑步骤数，`observation_reads` 是成功接受的本地观察读取页数。`max_subtasks` 限制计划子任务数，`max_plan_steps` 限制 `steps`；`catalog + tools` 共用 `max_data_calls`，不以并发数倍增额度，`observation_reads` 独立受 `max_observation_reads` 限制。准备了意图但没有实际派发时，不增加 `steps` 或 `retries`。`RunResult.usage.provider_requests` 是全 run 累计的非负整数，可大于 1；累计 token/费用中存在未测量用量时，对应字段保持 null。已知未发生的调用/token 为 0。
 
 每个 JSONL 事件至少有：
 
@@ -572,6 +624,8 @@ class PlannerPort(Protocol):
 ```
 
 事件覆盖 run start/end、plan、step state change、module/tool call start/end、retry、verification 和 budget stop，以及 `tool.observed`、`observation.read`、`tool.replan_requested` 与 `tool.loop_detected`。普通模式的 `seq` 在每个 run 内严格递增；持久模式在每个 attempt 审计分段内独立递增。调用开始与结束由 `call_id` 关联。并行工具的开始意图和结果提交分别保持本批选择顺序，物理完成顺序不决定事件顺序。常规模块或工具的 `*.call.failed` 事件带稳定的 `error.code/message/retryable/recoverable` 和 `duration_ms`；恢复时辅助目录注册的 `recovery.prepare_catalog.call.failed` 是例外，事件中的 `error`、`duration_ms` 可为 null，应结合 `data_ref` 指向的完整响应及恢复错误判断失败。timeout、invalid response、adapter exception 使用不泄露原始 URL、异常文本或 API key 的通用错误信息。记录足以复现控制决策的输入摘要、参数、状态、错误码、用量和耗时；大结果用 evidence/result ID 引用并受大小限制。
+
+内容校验拒绝另记录 `content.output.rejected`，data_ref指向含具体诊断的 ContentFeedback 工件；解决后记录 `content.feedback.resolved`。原失败调用、拒绝输出与解决事件都保留在历史中。页面仅展示有界预览并通过原始事件定位，修正成功后清除当前失败提示。
 
 ```python
 class TraceSink(Protocol):
@@ -614,13 +668,15 @@ class AttemptTraceSink(TraceSink, Protocol):
 - `async search(SearchRequest) -> ModuleResult[SearchResponse]`。
 - `async prepare_catalog(CatalogRegistrationRequest) -> ModuleResult[CatalogHandle]`，完整索引输入快照并返回可复用句柄；不向 provider 发送全目录。
 - `async compose(ComposeRequest) -> ModuleResult[AnswerRecord]`。
+- 支持可选 ComposeRequest.revision 的完整旧答案、核验、verification_is_current 和 instructions，并把这些字段实际送进自己的模型 messages；不能只接收后忽略。空 revision 序列化省略，不改变首次生成的业务输入。
 - `async verify(VerifyRequest) -> ModuleResult[Verification]`，其中补证据 recommendation 带 `focus`。
 - 所有四个方法均为 async；每个调用回报 status、error/retryable、duration 和可测 usage。内容模块不执行数据模块工具、不读 gold、不改变运行控制器的运行状态，并避免阻塞事件循环。
+- 可选启用内容修正时，升级共享诊断和反馈模型、接收 ComposeFeedbackRequest/VerifyFeedbackRequest、把动态反馈送入模型 messages，再声明 content_feedback_protocol="content-feedback-v1"。不支持时省略声明，基本方法和请求仍可使用。
 
 **规划器与严格模型消费者需要同步：**
 
-- `ToolPlanningRequest` 的观察、上下文统计和读取结果字段，以及包含有界预览对象的 `evidence_summary`；不能假设每项都是完整 `EvidenceRecord`。
-- `PlannerPort.select_tools` 返回类型中的 `ReadObservationDecision`，并将工具观察、来源描述、工具正文与读取页全部视为不可信数据。
+- `AgentDecisionRequest` 的 context、remaining_turns 和 require_verification；有界 evidence_summary 不一定是完整 EvidenceRecord。
+- `AgentAction` 的严格 kind 联合类型，声明 agent_protocol="agent-loop-v1" 并只实现 decide；工具观察、来源描述、正文与读取页始终是不可信数据。
 - `RunConfig.max_parallel_tool_calls`、`ToolSpec.parallel_safe/exclusive_resource_keys` 和终止事件 detail 的逐调用列表；工具声明来自可信注册，不能由模型或请求副本的修改改变。
 - 工具反馈扩展的四项上下文配置、`ErrorInfo.recoverable` 和 `CallCounts.observation_reads`；旧版 `extra="forbid"` 模型会拒绝新字段，应升级共享模型后再接入。注册结果按字段值保持语义，不承诺保留输入 Python 对象身份。
 
@@ -641,16 +697,16 @@ class AttemptTraceSink(TraceSink, Protocol):
     "cancel_cleanup_timeout_ms": 3000,
     "max_subtasks": 8,
     "max_plan_steps": 8,
+    "max_agent_turns": 32,
+    "require_verification": false,
     "max_data_calls": 12,
     "max_model_calls": 12,
     "max_retries_per_data_operation": 1,
-    "max_feedback_rounds": 2,
     "candidate_top_k": 5,
     "max_output_bytes_per_call": 65536,
     "catalog_page_size": 100,
     "max_catalog_sources": 2000,
     "max_catalog_bytes": 2000000,
-    "fixed_extract_max_chars": 12000,
     "max_planner_context_bytes": 24000,
     "planner_preview_bytes": 2000,
     "max_observation_reads": 8,
@@ -661,14 +717,14 @@ class AttemptTraceSink(TraceSink, Protocol):
     "dataset_snapshot": "lake-v3",
     "model_id": "team-selected-model",
     "model_params": {"temperature": 0},
-    "prompt_versions": {"planner": "planner-v0.2-observations", "content": "content-v0.1"},
+    "prompt_versions": {"planner": "planner-v1.1-exploration", "content": "content-v0.1"},
     "code_version": null,
     "config_version": "dev-v1"
   }
 }
 ```
 
-成功回包（一个子任务、一个工具步骤、无重试或验证反馈；规划器依次 decompose、select_tools/actions、select_tools/finish，每个规划器方法及 compose/verify 各发起一次 provider 请求；content 次数含 prepare_catalog、两次 search、compose 和 verify）：
+成功回包示例：模型选择 search → tools → compose → verify → finish，共五次 decide；本例 decide、compose、verify 均各产生一次 provider 请求，共七次。内容调用共 prepare_catalog、search、compose、verify 四次，目录分两页。该动作序列只是示例，不是运行时强制步骤。
 
 ```json
 {
@@ -677,19 +733,19 @@ class AttemptTraceSink(TraceSink, Protocol):
   "task_id": "dev-001",
   "mode": "full_agent",
   "status": "completed",
-  "stop_reason": "verified_supported",
+  "stop_reason": "agent_finished",
   "answer": {
     "text": "The reported value is ...",
     "citations": ["ev-4"],
     "unresolved_questions": [],
     "structured_result": null
   },
-  "usage": {"input_tokens": null, "output_tokens": null, "cost": null, "currency": null, "provider_requests": 5},
-  "call_counts": {"planner": 3, "content": 5, "model_calls": 5, "catalog": 2, "tools": 1, "retries": 0, "steps": 1, "observation_reads": 0},
+  "usage": {"input_tokens": null, "output_tokens": null, "cost": null, "currency": null, "provider_requests": 7},
+  "call_counts": {"planner": 5, "content": 4, "model_calls": 7, "catalog": 2, "tools": 1, "retries": 0, "steps": 1, "observation_reads": 0},
   "started_at": "2026-10-22T10:20:25Z",
   "ended_at": "2026-10-22T10:20:30Z",
   "duration_ms": 5000,
-  "versions": {"dataset_snapshot": "lake-v3", "model_id": "team-selected-model", "model_params": {"temperature": 0}, "prompt_versions": {"planner": "planner-v0.2-observations", "content": "content-v0.1"}, "code_version": null, "config_version": "dev-v1"},
+  "versions": {"dataset_snapshot": "lake-v3", "model_id": "team-selected-model", "model_params": {"temperature": 0}, "prompt_versions": {"planner": "planner-v1.1-exploration", "content": "content-v0.1"}, "code_version": null, "config_version": "dev-v1"},
   "trace_ref": "runs/run-123/events.jsonl"
 }
 ```
@@ -698,7 +754,7 @@ class AttemptTraceSink(TraceSink, Protocol):
 
 1. 数据模块的真实 `SourceRecord`/`EvidenceRecord` schema、工具清单、`query` 参数 schema、数据快照命名及错误码；确认 benchmark 快照能完整纳入 `max_catalog_sources`/`max_catalog_bytes`。若不能，三人先冻结任务子集或调整上限，再开始 run。
 2. 内容模块确认是否接受 `prepare_catalog` 建本地索引及 run-scoped handle，并确认 AnswerRecord 是否需要句子级引用。
-3. 三种实验模式的 `fixed_retrieval` top-k；必须用同一数据范围、基础模型和公开预算比较。`extract` 的最小参数已在本提案中给出，数据模块可在接受前指出无法满足的字段。
+3. 三组 EvaluationMode 的固定 top-k、工具参数映射和评分标注；它们只属于评估侧，不添加生产模式或强制数据模块实现 extract。比较须采用相同数据范围、基础模型、采样和公开预算，完整记录统计定义及缺测项。
 4. 将来启用 token cap 所需的兼容 tokenizer、实际 usage 计量和控制器实现；当前 token caps 必须为 null，使用字节、调用数和时间预算控量。
 5. 确认共享模型升级和请求/响应 JSON 样例，特别是受控并行声明、静态互斥 key 和终止事件逐调用列表；当前 JSON `schema_version` 保持 `1.0`，未来若调整兼容策略需单独冻结版本，不把文档 v0.5 当作已完成 schema 迁移。
 

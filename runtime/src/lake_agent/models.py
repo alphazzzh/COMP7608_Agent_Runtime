@@ -7,15 +7,30 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 JsonObject = dict[str, JsonValue]
 NonEmpty = Annotated[str, Field(min_length=1)]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
-Mode = Literal["fixed_retrieval", "no_verifier", "full_agent"]
+# 修订目标是待解释的业务文本，不是执行策略；完整请求仍另受UTF-8字节预算约束。
+RevisionInstructions = Annotated[str, Field(min_length=1, max_length=4000)]
+AGENT_PROTOCOL = "agent-loop-v1"
+CONTENT_FEEDBACK_PROTOCOL = "content-feedback-v1"
+RunMode = Literal["no_verifier", "full_agent"]
+# 保留旧类型别名供宿主导入；评估报告的对照组不属于可执行运行模式。
+Mode = RunMode
 Status = Literal["completed", "insufficient_evidence", "budget_exceeded", "timeout", "failed"]
 T = TypeVar("T")
 
@@ -27,28 +42,29 @@ class Model(BaseModel):
 
 
 class PromptVersions(Model):
-    planner: str | None = "planner-v0.2-observations"
+    planner: str | None = "planner-v1.1-exploration"
     content: str | None = "content-v0.1"
 
 
 class RunConfig(Model):
-    """可配置的运行限制；默认值适用于离线示例。"""
+    """可配置的运行限制；实际模型身份由宿主或服务端配置提供。"""
 
     max_wall_time_ms: PositiveInt = 120_000
     per_call_timeout_ms: PositiveInt = 20_000
     cancel_cleanup_timeout_ms: PositiveInt = 3_000
     max_subtasks: PositiveInt = 8
     max_plan_steps: PositiveInt = 8
+    # 自由决策循环独立限次，避免本地动作或零请求适配器无限循环。
+    max_agent_turns: PositiveInt = 32
+    require_verification: bool = False
     max_data_calls: PositiveInt = 12
     max_model_calls: PositiveInt = 12
     max_retries_per_data_operation: NonNegativeInt = 1
-    max_feedback_rounds: NonNegativeInt = 2
     candidate_top_k: PositiveInt = 5
     max_output_bytes_per_call: PositiveInt = 65_536
     catalog_page_size: PositiveInt = 100
     max_catalog_sources: PositiveInt = 2_000
     max_catalog_bytes: PositiveInt = 2_000_000
-    fixed_extract_max_chars: PositiveInt = 12_000
     # 以下限制按工作上下文的 UTF-8 JSON 字节计算，不是服务商的 token 限制。
     max_planner_context_bytes: Annotated[int, Field(ge=1024)] = 24_000
     planner_preview_bytes: Annotated[int, Field(ge=256)] = 2_000
@@ -59,7 +75,7 @@ class RunConfig(Model):
     max_input_tokens: PositiveInt | None = None
     max_output_tokens: PositiveInt | None = None
     dataset_snapshot: NonEmpty | None = None
-    model_id: NonEmpty = "offline-demo"
+    model_id: NonEmpty = "unconfigured"
     model_params: JsonObject = Field(default_factory=lambda: {"temperature": 0})
     prompt_versions: PromptVersions = Field(default_factory=PromptVersions)
     code_version: str | None = None
@@ -77,7 +93,7 @@ class RunRequest(Model):
     schema_version: Literal["1.0"] = "1.0"
     task_id: NonEmpty
     question: NonEmpty
-    mode: Mode = "full_agent"
+    mode: RunMode = "full_agent"
     run_id: NonEmpty | None = None
     config: RunConfig = Field(default_factory=RunConfig)
 
@@ -93,6 +109,47 @@ class ErrorInfo(Model):
     message: NonEmpty
     retryable: bool = False
     recoverable: bool = False
+    # 可选诊断只保存模型输出的有限差异，不容纳 HTTP 请求、凭据或提供方封装。
+    details: JsonObject | None = None
+
+    @field_validator("details")
+    @classmethod
+    def bounded_details(cls, value: JsonObject | None) -> JsonObject | None:
+        """把可持久化诊断限制为 8 KB 有限 UTF-8 JSON，避免错误放大日志。"""
+        if value is not None:
+            try:
+                encoded = json.dumps(
+                    value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                ).encode("utf-8")
+            except (ValueError, TypeError, UnicodeError, RecursionError):
+                raise ValueError("diagnostics must be finite UTF-8 JSON") from None
+            if len(encoded) > 8000:
+                raise ValueError("diagnostics exceed the 8000-byte limit")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_absent_details(self, handler):
+        """旧适配器和已保存错误在未使用扩展时保留原来的字段集合。"""
+        result = handler(self)
+        if self.details is None:
+            result.pop("details", None)
+        return result
+
+
+class ContentFeedback(Model):
+    """上一已知失败的内容调用；由控制器传递，不包含网络层状态。"""
+
+    phase: Literal["compose", "verify"]
+    call_id: NonEmpty
+    error: ErrorInfo
+
+
+class RunFailure(Model):
+    """最近尚未解决的具体调用错误，用于终态说明和可追溯定位。"""
+
+    phase: NonEmpty
+    call_id: NonEmpty
+    error: ErrorInfo
 
 
 class Usage(Model):
@@ -312,12 +369,6 @@ class SearchResponse(Model):
         return self
 
 
-class ComposeRequest(ModelCallContext):
-    question: NonEmpty
-    completed_subtasks: list[Subtask] = Field(default_factory=list)
-    evidence: list[EvidenceRecord] = Field(default_factory=list)
-
-
 class AnswerRecord(Model):
     text: NonEmpty
     citations: list[NonEmpty] = Field(default_factory=list)
@@ -329,6 +380,12 @@ class VerifyRequest(ModelCallContext):
     question: NonEmpty
     answer: AnswerRecord
     evidence: list[EvidenceRecord] = Field(default_factory=list)
+
+
+class VerifyFeedbackRequest(VerifyRequest):
+    """显式支持反馈的内容端口收到的核验请求；基础 VerifyRequest 不变。"""
+
+    feedback: ContentFeedback
 
 
 class Focus(Model):
@@ -380,6 +437,49 @@ class Verification(Model):
         return self
 
 
+class AnswerRevision(Model):
+    """明确传递旧答案、相关核验及修改目标，不赋予内容端口任何运行权限。
+
+    verification_is_current由控制器按完整可信输入计算；False表示历史意见，
+    不能把意见过期理解为当前答案已经错误。首次生成不需要本对象。
+    """
+
+    previous_answer: AnswerRecord
+    verification: Verification | None = None
+    verification_is_current: bool = False
+    instructions: RevisionInstructions | None = None
+
+    @model_validator(mode="after")
+    def require_current_verification(self) -> AnswerRevision:
+        """没有核验对象时不能声称它适用于当前状态。"""
+        if self.verification_is_current and self.verification is None:
+            raise ValueError("current verification requires a verification result")
+        return self
+
+
+class ComposeRequest(ModelCallContext):
+    """生成或修订答案；revision显式携带业务反馈，不改写原问题或证据。"""
+
+    question: NonEmpty
+    completed_subtasks: list[Subtask] = Field(default_factory=list)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    revision: AnswerRevision | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_revision(self, handler):
+        """首次生成保留旧线格式；扩展纠错子类同样省略未使用的修订字段。"""
+        result = handler(self)
+        if self.revision is None:
+            result.pop("revision", None)
+        return result
+
+
+class ComposeFeedbackRequest(ComposeRequest):
+    """只有声明 content-feedback-v1 的内容端口才会收到的生成请求。"""
+
+    feedback: ContentFeedback
+
+
 class BudgetRemaining(Model):
     wall_time_ms: NonNegativeInt
     model_calls: NonNegativeInt
@@ -388,28 +488,16 @@ class BudgetRemaining(Model):
     subtasks: NonNegativeInt
 
 
-class PlannerRequest(ModelCallContext):
+class AgentDecisionRequest(ModelCallContext):
+    """一次自由决策的公开输入；运行身份和服务商配置仍由调用上下文携带。"""
+
     question: NonEmpty
     catalog_snapshot_id: NonEmpty
     tool_specs: list[ToolSpec]
     budget_remaining: BudgetRemaining
-
-
-class TaskPlan(Model):
-    subtasks: Annotated[list[Subtask], Field(min_length=1)]
-
-
-class ToolPlanningRequest(ModelCallContext):
-    question: NonEmpty
-    subtask: Subtask
-    candidates: list[Candidate]
-    evidence_summary: list[EvidenceRecord | JsonObject] = Field(default_factory=list)
-    tool_observations: list[JsonObject] = Field(default_factory=list)
-    context_status: JsonObject = Field(default_factory=dict)
-    observation_read: JsonObject | None = None
-    verifier_focus: Focus | None = None
-    tool_specs: list[ToolSpec]
-    budget_remaining: BudgetRemaining
+    context: JsonObject = Field(default_factory=dict)
+    remaining_turns: NonNegativeInt
+    require_verification: bool = False
 
 
 class ToolStep(Model):
@@ -427,11 +515,6 @@ class ToolPlan(Model):
     steps: Annotated[list[ToolStep], Field(min_length=1)]
 
 
-class FinishDecision(Model):
-    kind: Literal["finish"] = "finish"
-    reason: Literal["evidence_complete", "insufficient_evidence", "not_applicable"]
-
-
 class ReadObservationDecision(Model):
     """请求读取已观测结果的一页内容，不能用于请求文件系统路径。
 
@@ -444,6 +527,96 @@ class ReadObservationDecision(Model):
     pointer: str = ""
     offset: NonNegativeInt = 0
     max_chars: Annotated[int, Field(ge=1, le=4096)] = 2000
+
+
+class AgentSearchDecision(Model):
+    """按问题相关查询检索目录，可进一步限制到已注册的数据源集合。"""
+
+    kind: Literal["search"] = "search"
+    query: NonEmpty
+    source_ids: list[NonEmpty] | None = None
+
+
+class AgentToolStep(Model):
+    """自由循环中的工具步骤，不强制绑定控制器预先拆分的子任务。"""
+
+    step_id: NonEmpty
+    tool_name: NonEmpty
+    source_ids: list[NonEmpty]
+    args: JsonObject
+    depends_on: list[NonEmpty] = Field(default_factory=list)
+    purpose: NonEmpty
+
+
+class AgentToolsDecision(Model):
+    """提出至少一个工具步骤；授权、依赖与预算由控制器最终检查。"""
+
+    kind: Literal["tools"] = "tools"
+    steps: Annotated[list[AgentToolStep], Field(min_length=1)]
+
+
+class AgentReadCatalogDecision(Model):
+    """读取冻结的完整注册目录的一页；候选检索结果不等同于授权边界。"""
+
+    kind: Literal["read_catalog"] = "read_catalog"
+    offset: NonNegativeInt = 0
+    limit: Annotated[int, Field(ge=1, le=100)] = 20
+
+
+class AgentPlanDecision(Model):
+    """可选地记录或调整子任务；空计划允许直接处理不需要拆解的问题。"""
+
+    kind: Literal["plan"] = "plan"
+    subtasks: list[Subtask] = Field(default_factory=list)
+    completed_subtask_ids: list[NonEmpty] = Field(default_factory=list)
+
+
+class AgentComposeDecision(Model):
+    """提出生成或定向修订；修改要求不能改变控制器的预算与验收政策。"""
+
+    kind: Literal["compose"] = "compose"
+    revision_instructions: RevisionInstructions | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_revision_instructions(self, handler):
+        """无定向要求的旧compose动作继续只序列化kind。"""
+        result = handler(self)
+        if self.revision_instructions is None:
+            result.pop("revision_instructions", None)
+        return result
+
+
+class AgentVerifyDecision(Model):
+    """请求内容适配器校验当前答案与可用证据。"""
+
+    kind: Literal["verify"] = "verify"
+
+
+class AgentFinishDecision(Model):
+    """请求提交已组织的答案；完成条件由控制器而非模型声明决定。"""
+
+    kind: Literal["finish"] = "finish"
+
+
+class AgentStopDecision(Model):
+    """在不能继续推进时明确停止，并保留可审计的原因。"""
+
+    kind: Literal["stop"] = "stop"
+    reason: NonEmpty
+
+
+AgentAction = Annotated[
+    AgentSearchDecision
+    | AgentToolsDecision
+    | ReadObservationDecision
+    | AgentReadCatalogDecision
+    | AgentPlanDecision
+    | AgentComposeDecision
+    | AgentVerifyDecision
+    | AgentFinishDecision
+    | AgentStopDecision,
+    Field(discriminator="kind"),
+]
 
 
 class CallCounts(Model):
@@ -470,7 +643,7 @@ class RunResult(Model):
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmpty
     task_id: NonEmpty
-    mode: Mode
+    mode: RunMode
     status: Status
     stop_reason: NonEmpty
     answer: AnswerRecord | None = None
@@ -481,6 +654,15 @@ class RunResult(Model):
     duration_ms: NonNegativeInt
     versions: Versions
     trace_ref: str | None = None
+    failure: RunFailure | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_failure(self, handler):
+        """普通旧结果不增加 null 字段，成功和历史报告保持原来的线形状。"""
+        result = handler(self)
+        if self.failure is None:
+            result.pop("failure", None)
+        return result
 
     @model_validator(mode="after")
     def require_completed_answer(self) -> RunResult:
