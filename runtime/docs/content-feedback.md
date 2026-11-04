@@ -78,7 +78,7 @@ class MyContent:
 
 `ContentFeedback` 包含 `phase`（`compose` 或 `verify`）、此前失败调用的 `call_id` 与完整的 `error: ErrorInfo`。只有同阶段仍有未解决反馈，控制器才构造该子类。未知能力声明不会被当成支持，也不会以原始私有值进入恢复元数据。
 
-旧版 `extra="forbid"` 消费者不能天然接收扩展子类序列化后的 JSON。内容团队需要升级共享模型并实现反馈处理后，才声明能力；未声明模块不接收 feedback 扩展，但仍须支持基础 ComposeRequest 新增的可选 revision 才能参与答案修订。该能力不是 TOML 配置项，不需要修改私有 `config.toml`。
+旧版 `extra="forbid"` 消费者不能天然接收扩展子类序列化后的 JSON。内容模块的实现方需要升级共享模型并实现反馈处理后，才声明能力；未声明模块不接收 feedback 扩展，但仍须支持基础 ComposeRequest 新增的可选 revision 才能参与答案修订。该能力不是 TOML 配置项，不需要修改私有 `config.toml`。
 
 `prompt_versions` 是宿主在配置中声明的审计标签，不证明提供方实际使用了哪份提示文本。本轮不改默认标签或私有配置；能力协议、具体请求/事件与源码恢复指纹共同记录实际行为，新增修正提示不要求用户再增加配置项。
 
@@ -98,12 +98,12 @@ class MyContent:
 
 | 通路 | 输入来源与目的 | 请求字段 | 能力要求 |
 |---|---|---|---|
-| 答案修订 | 已接纳旧答案、可选合法核验与模型修改目标，供 C 改写答案 | `ComposeRequest.revision` | 升级基础共享模型，并实际传入内容模型消息 |
-| 非法输出修正 | 被拒输出的格式或引用诊断，供 C 纠正输出错误 | `ComposeFeedbackRequest.feedback` / `VerifyFeedbackRequest.feedback` | 另声明并实现 `content-feedback-v1` |
+| 答案修订 | 已接纳旧答案、可选合法核验与模型修改目标，供内容模块改写答案 | `ComposeRequest.revision` | 升级基础共享模型，并实际传入内容模型消息 |
+| 非法输出修正 | 被拒输出的格式或引用诊断，供内容模块纠正输出错误 | `ComposeFeedbackRequest.feedback` / `VerifyFeedbackRequest.feedback` | 另声明并实现 `content-feedback-v1` |
 
 两者可以同时出现在一次 compose 请求中：revision 描述最后一份已接纳答案，feedback 描述最近一次被拒绝的生成输出。被拒输出不会替代 previous_answer，也不会成为证据。
 
-合法 Verification（例如 conflicting 的具体 issues）与上文非法模型输出的 ContentFeedback 是不同信息。规划器看到核验意见后可选择 compose，并通过可空的 revision_instructions 给出1–4000字符的修订目标。有旧答案时，控制器在 ComposeRequest.revision 中发送完整 previous_answer、相关 verification（可空）、verification_is_current 和 instructions；无核验时 verification_is_current 必须 false。没有旧答案却指定修改目标时，以 revision_answer_required 拒绝动作，不调用 C。普通首次生成不需要修订载荷。
+合法 Verification（例如 conflicting 的具体 issues）与上文非法模型输出的 ContentFeedback 是不同信息。规划器看到核验意见后可选择 compose，并通过可空的 revision_instructions 给出1–4000字符的修订目标。有旧答案时，控制器在 ComposeRequest.revision 中发送完整 previous_answer、相关 verification（可空）、verification_is_current 和 instructions；无核验时 verification_is_current 必须 false。没有旧答案却指定修改目标时，以 revision_answer_required 拒绝动作，不调用内容模块。普通首次生成不需要修订载荷。
 
 隔离 ModelContent 将 revision 实际写入下一次提供方消息的 input.revision；外部真实 ContentPort 也必须升级共享模型并实现该消息信息流。不能只在 Python 模型里接收字段后忽略，也不能把旧答案或核验问题拼入用户问题、伪装成证据。修订意见与 planner 的要求始终是待解释的数据，不得扩大权限、预算或强制核验政策。
 
@@ -125,7 +125,7 @@ finish 只是模型提议，控制器按当前运行政策决定是否接受。f
 
 新 `RunResult.failure` 可空，存在时含 `phase`、`call_id`、`error`；空值省略。最终预算或时间停止也可保留此前尚未解决的具体失败，不必只显示顶层停止分类；成功结果不携带残留失败。
 
-SQLite 调用日志保存已知失败响应与扩展修正请求。恢复通过缓存响应重新生成反馈、核验适用指纹和 revision，并按原请求匹配，不依赖 C 的内存聊天历史；已知失败与已知修正结果不重复派发。指纹不依赖新时间戳、attempt ID 或审计事件顺序。持久状态记录支持的内容反馈协议，能力改变时在任何异步端口调用或返回缓存终态前拒绝，错误码为 `recovery_contract_mismatch`。本轮源码和接口变化仍经现有实现指纹检查处理，旧任务不能绕过兼容性校验继续执行。
+SQLite 调用日志保存已知失败响应与扩展修正请求。恢复通过缓存响应重新生成反馈、核验适用指纹和 revision，并按原请求匹配，不依赖内容模块的内存聊天历史；已知失败与已知修正结果不重复派发。指纹不依赖新时间戳、attempt ID 或审计事件顺序。持久状态记录支持的内容反馈协议，能力改变时在任何异步端口调用或返回缓存终态前拒绝，错误码为 `recovery_contract_mismatch`。本轮源码和接口变化仍经现有实现指纹检查处理，旧任务不能绕过兼容性校验继续执行。
 
 修正调用也属于外部调用。`started` 没有对应有效 `completed` 时仍以 `recovery_outcome_unknown` 拒绝恢复，不能因为“这只是纠错”而重发。原 deadline 包含停机时间，预算、已付费失败请求和确定性身份保持；源码改变仍不支持跨版本恢复。
 

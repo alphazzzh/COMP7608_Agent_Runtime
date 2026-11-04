@@ -63,7 +63,7 @@ uv build --offline
 
 根部保留两个明确的执行模块，其模块名不变，也不会因 pytest 收集而自动启动：
 
-- `tests.isolated_runtime`：队友模块尚未完成时的隔离环境；明确执行提问或 `--web` 才会使用真实模型，接入步骤见[配置说明](../docs/configuration.md#队友模块未完成时独立测试-b)。
+- `tests.isolated_runtime`：待接入模块未就绪时的隔离环境；明确执行提问或 `--web` 才会使用真实模型，接入步骤见[配置说明](../docs/configuration.md#待接入模块未就绪时的隔离测试)。
 - `tests.ablation_runtime`：显式给定任务集和配置的评估宿主；指标边界见[消融评估说明](../docs/ablation-evaluation.md)。
 
 这两个入口的 `--help` 只显示用法。`tests/` 不打包进生产 wheel；正式入口不会自动导入测试端口或固定检索基线。

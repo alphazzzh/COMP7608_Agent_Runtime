@@ -1,6 +1,6 @@
 # LangGraph 流程与安全执行边界
 
-运行流程使用 LangGraph `StateGraph`；`run`、`resume` 和队友 DataPort/ContentPort 继续使用核心异步接口。模型通过异步 `httpx` 适配器调用 API，无需改成 LangChain 模型客户端。
+运行流程使用 LangGraph `StateGraph`；`run`、`resume` 和待接入模块的 DataPort/ContentPort 继续使用核心异步接口。模型通过异步 `httpx` 适配器调用 API，无需改成 LangChain 模型客户端。
 
 ## 唯一模型驱动图
 
@@ -19,7 +19,7 @@ flowchart LR
 
 复杂任务的模型提示鼓励先用可选 DAG 计划组织工作记忆，随发现修改计划和 completed_subtask_ids。结构未知时先确认目录、可信 inspect/schema 工具或观察分页，再决定过滤和聚合。核验失败时根据 issues/recommendation 选择定向补证、修改答案或停止，避免重复失败参数；这些提示是启发，不是图的强制顺序。
 
-目录元数据通过既有 prepare_catalog 交给 C；无正文证据也可请求目录说明或澄清，引用仍不能伪造。动态工作上下文有总字节上限，分页前预留未解决反馈的结构化身份，紧随读取的决策收到完整页面，其他字段使用明确的省略或截断预览；后续动作产生新反馈时，较旧页面可明确标记省略。临时状态属于单次运行，各次运行绑定独立控制器；图节点串行执行，工具节点内部按可信声明受控并行。
+目录元数据通过既有 prepare_catalog 交给内容模块；无正文证据也可请求目录说明或澄清，引用仍不能伪造。动态工作上下文有总字节上限，分页前预留未解决反馈的结构化身份，紧随读取的决策收到完整页面，其他字段使用明确的省略或截断预览；后续动作产生新反馈时，较旧页面可明确标记省略。临时状态属于单次运行，各次运行绑定独立控制器；图节点串行执行，工具节点内部按可信声明受控并行。
 
 ## 内容输出错误与下一轮决策
 
@@ -46,7 +46,7 @@ context.verification_status 显式区分 missing/current/stale；历史核验仍
 
 控制器先检查未解决反馈，再检查是否有答案，最后应用核验政策。合法的不支持核验不会在 verify 节点直接终止，模型仍有机会补证或修改答案；只有模型之后提出 finish，才进入以上政策分支。通过 supported 核验也不会自动触发 finish。
 
-compose 可通过 revision_instructions 指定1–4000字符的修改目标。已有答案时，控制器构造 ComposeRequest.revision，带完整 previous_answer、相关 verification、verification_is_current 和 instructions；没有旧答案却指定目标会以 revision_answer_required 拒绝。无状态 C 据此修改答案，不依赖隐式会话。首次 compose 的 revision 默认为空且序列化省略。修订数据进入提供方 messages，不改 question、不充当 Evidence、不提升权限或刷新预算。外部真实内容实现必须升级共享模型并实际传给自己的模型，仓库不声称已修改队友模块。
+compose 可通过 revision_instructions 指定1–4000字符的修改目标。已有答案时，控制器构造 ComposeRequest.revision，带完整 previous_answer、相关 verification、verification_is_current 和 instructions；没有旧答案却指定目标会以 revision_answer_required 拒绝。无状态内容模块据此修改答案，不依赖隐式会话。首次 compose 的 revision 默认为空且序列化省略。修订数据进入提供方 messages，不改 question、不充当 Evidence、不提升权限或刷新预算。外部真实内容实现必须升级共享模型并实际传给自己的模型，仓库不声称已修改待接入模块。
 
 ## 交互与实验策略
 
@@ -87,7 +87,7 @@ compose 可通过 revision_instructions 指定1–4000字符的修改目标。�
 
 | 文件 | 阅读内容 |
 |---|---|
-| [ports.py](../src/lake_agent/ports.py) / [models.py](../src/lake_agent/models.py) | 队友端口、动作请求与运行配置 |
+| [ports.py](../src/lake_agent/ports.py) / [models.py](../src/lake_agent/models.py) | 模块接入端口、动作请求与运行配置 |
 | [engine/agent_workflow.py](../src/lake_agent/engine/agent_workflow.py) | 动作节点与模型循环 |
 | [engine/agent_context.py](../src/lake_agent/engine/agent_context.py) | 有界上下文与目录分页 |
 | [engine/content_feedback.py](../src/lake_agent/engine/content_feedback.py) | 具体输出诊断与显式内容修正能力 |
@@ -98,4 +98,4 @@ compose 可通过 revision_instructions 指定1–4000字符的修改目标。�
 
 `engine/` 是正式运行的内部实现；外部接入仍使用 `runtime.py`、`models.py` 与 `ports.py`。实验运行器在 `tests/`，报告格式在独立的 `evaluation/models.py`。全部文件映射见[源码目录说明](source-layout.md)。
 
-队友继续实现异步 DataPort/ContentPort，通过[工作台注册说明](project-workspace.md#编程注册)绑定模块，无需依赖图内部状态。工具并行、证据校验与恢复属于执行能力；真实数据和内容模块接入后，仍需用固定任务集测量答案质量、费用与延迟。历史[验收记录](project-workspace-acceptance-2026-11-02.md)仅代表归档版本。
+待接入模块分别实现异步 DataPort/ContentPort，通过[工作台注册说明](project-workspace.md#编程注册)绑定模块，无需依赖图内部状态。工具并行、证据校验与恢复属于执行能力；真实数据和内容模块接入后，仍需用固定任务集测量答案质量、费用与延迟。历史[验收记录](project-workspace-acceptance-2026-11-02.md)仅代表归档版本。

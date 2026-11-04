@@ -4,14 +4,14 @@
 
 ## 当前接入方式
 
-产品入口从 TOML 加载真实模型和团队模块，不包含默认演示配置、固定资料、固定答案或固定核验逻辑。真实数据处理与内容模块仍由队友实现；Harness 通过同一进程内的异步端口连接它们。
+产品入口从 TOML 加载真实模型和待接入模块，不包含默认演示配置、固定资料、固定答案或固定核验逻辑。数据处理模块与内容模块的生产实现尚待接入；Harness 通过同一进程内的异步端口连接它们。
 
 | 部分 | 实现与职责 |
 |---|---|
 | Harness | 规划授权、参数/来源校验、预算/超时/重试、安全并行、证据、恢复与审计 |
 | JsonPlanner | 按配置调用真实 OpenAI-compatible Chat Completions API，通过 `decide` 提出下一动作与可选计划 |
 | 工作台 | 智能问答、来源目录、任务历史、真正删除及报告导出；评估导入由可信测试宿主显式开启 |
-| DataPort / ContentPort | 由真实团队模块提供，通过配置声明工厂及私有参数 |
+| DataPort / ContentPort | 分别由待接入的数据处理模块与内容模块实现，通过配置声明工厂及私有参数 |
 
 ## 准备配置
 
@@ -23,7 +23,7 @@ uv sync --extra dev --extra web --frozen
 cp config.example.toml config.toml
 ```
 
-填写 `config.toml` 的 API 地址、模型和密钥来源，并安装实际团队适配器，将两个 factory 改成可导入的 `module:function`。配置与工厂协议详见 [服务端配置说明](runtime/docs/configuration.md)。准备好真实模块后，手动运行：
+填写 `config.toml` 的 API 地址、模型和密钥来源，并安装待接入模块的适配器，将两个 factory 改成可导入的 `module:function`。配置与工厂协议详见 [服务端配置说明](runtime/docs/configuration.md)。准备好真实模块后，手动运行：
 
 ```bash
 uv run --extra web --frozen lake-agent-web --config config.toml
@@ -31,7 +31,7 @@ uv run --extra web --frozen lake-agent-web --config config.toml
 
 配置非法或模块无法导入会在启动前退出；不会静默切换到测试数据。应用仅监听本机，默认 http://127.0.0.1:8765 。相同配置和存储目录保留同一组历史；连接变化或内核版本不兼容的旧任务不能继续恢复。
 
-## 队友模块边界
+## 待接入模块
 
 - 数据模块实现 `DataPort.catalog/tool_specs/invoke`。`tool_specs()` 为同步可信元数据，其他方法异步，返回稳定 source ID、受工具 schema 约束的执行结果与 locator。
 - 内容模块实现 `ContentPort.prepare_catalog/search/compose/verify`。本地目录与检索返回 `Usage.local()`；生成和核验如实报告模型用量，引用只能来自输入证据。

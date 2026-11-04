@@ -1,12 +1,12 @@
 # 异构数据池 Agent Harness：运行控制与异步执行接口契约 v0.5
 
-**更新日期：** 2026-11-04（A/C 契约 v0.5 增量修订字段；B 统一采用 agent-loop-v1）
+**更新日期：** 2026-11-04（数据处理模块与内容模块契约 v0.5 增量修订字段；运行时统一采用 agent-loop-v1）
 
 **状态：** 当前运行时包 `0.7.0` 沿用本核心契约；v0.5 在既有受控工具并行基础上增加可选持久调用状态与严格同版本恢复，当前另提供显式 opt-in 的 `content-feedback-v1` 请求扩展。工作台与服务端执行配置不改变核心方法签名；其接入与HTTP接口见[项目工作台说明](project-workspace.md)。此状态不构成真实数据或模型联调通过声明。
 
 **范围：** 定义运行控制器（任务规划与运行控制）与调用方、数据模块、内容模块、规划器及 trace 的输入输出。Harness 面向通用异构数据池；Lake 数据集只用于评测，在线控制策略不读取其标签，也不预设某个数据集的工具名称或数据格式。Python 包名保持 `lake_agent`。
 
-A/C 异步方法及 JSON `schema_version="1.0"` 保持；ComposeRequest 增加默认空的 revision，AgentComposeDecision 增加默认空的 revision_instructions。首次生成省略 revision；外部严格消费者需升级共享模型并实现修订数据，不能仅凭 schema_version 相同推断兼容。输出错误修正另要求 C 显式支持请求子类。B 的唯一规划协议为 `AgentPlannerPort.decide`。运行时不再提供两阶段规划、固定检索生产模式或自动回退图。文档版本、包版本和 JSON 结构版本独立。
+数据处理模块与内容模块的异步方法及 JSON `schema_version="1.0"` 保持；ComposeRequest 增加默认空的 revision，AgentComposeDecision 增加默认空的 revision_instructions。首次生成省略 revision；外部严格消费者需升级共享模型并实现修订数据，不能仅凭 schema_version 相同推断兼容。输出错误修正另要求内容模块显式支持请求子类。运行时的唯一规划协议为 `AgentPlannerPort.decide`。运行时不再提供两阶段规划、固定检索生产模式或自动回退图。文档版本、包版本和 JSON 结构版本独立。
 
 LangGraph 只组织动作路由；授权、预算和结果提交仍由运行控制器负责。SQLite 已验证调用账本是恢复依据，不启用第二套图 checkpointer。
 
@@ -34,7 +34,7 @@ LangGraph 只组织动作路由；授权、预算和结果提交仍由运行控�
 
 `RunConfig.max_agent_turns` 默认32，每次模型决策消耗一轮，即使返回 Usage.local() 也不豁免；达到上限返回 budget_exceeded/agent_turn_budget。`require_verification` 默认false，允许未核验完成；为true时 finish 必须有绑定当前完整答案、证据和政策的 supported 核验，否则以可继续决策的拒绝观察返回模型。相关输入变化使旧核验过期；完整输入相同的再次生成保留原判定。过期不等于当前答案已被证明错误。completed、内部核验通过、外部评测正确相互区别。测试 no_verifier 下核验动作被拒绝，与 require_verification=true 的组合在外部调用前停止。
 
-所有动作经过同一控制器的预算、超时、工具 schema、来源授权、并发、取消、引用与审计边界。新工具动作使用控制器内部单运行 scope，不要求模型或 A/C 实现新增子任务流程；A 仍接收同样 ToolRequest。C 通过已有 prepare_catalog 获得目录，可用标签说明可用来源，但正文事实必须来自实际输入证据，不能制造 evidence_id。
+所有动作经过同一控制器的预算、超时、工具 schema、来源授权、并发、取消、引用与审计边界。新工具动作使用控制器内部单运行 scope，不要求模型或待接入模块实现新增子任务流程；数据处理模块仍接收同样 ToolRequest。内容模块通过已有 prepare_catalog 获得目录，可用标签说明可用来源，但正文事实必须来自实际输入证据，不能制造 evidence_id。
 
 恢复继续从已知响应日志重建，`planner.decide` phase 使用严格 AgentDecisionRequest/ModuleResult[AgentAction]；持久状态记录固定的 planner_engine="agent-loop-v1"，恢复前验证端口协议。不会重新请求已完成的模型决策，也不会重放结果未知的外部调用。新源码的指纹与旧运行不一致时拒绝跨版本恢复。
 
@@ -88,7 +88,7 @@ async def resume(
 
 恢复读取要求运行时版本、实际源码摘要及请求/结果身份等状态校验通过；继续尚未终结的运行还要求可信工具契约一致。原绝对 UTC deadline 包含停机时间，历史预算不重置；正常终态（含预算停止与 provider 403 等普通错误）直接返回原结果，不读取工具清单或重新比较工具契约。取消、审计或状态写入故障仅在全部相关外部结果已知时可能恢复。源码变更、请求分叉或损坏状态均不能退回真实调用来尝试。
 
-持久状态另记录受支持的 `content_feedback_protocol` 或 null。恢复在返回缓存终态及异步端口调用前比较当前 C 能力，变化以 `recovery_contract_mismatch` 拒绝。失败内容响应和扩展修正请求按调用日志严格重建，不依赖 C 的会话内存；修正调用只有 started、没有有效 completed 时也以 `recovery_outcome_unknown` 拒绝，原预算和期限不刷新。
+持久状态另记录受支持的 `content_feedback_protocol` 或 null。恢复在返回缓存终态及异步端口调用前比较当前内容模块的能力，变化以 `recovery_contract_mismatch` 拒绝。失败内容响应和扩展修正请求按调用日志严格重建，不依赖内容模块的会话内存；修正调用只有 started、没有有效 completed 时也以 `recovery_outcome_unknown` 拒绝，原预算和期限不刷新。
 
 首次新派发前，用原目录 snapshot/digest 在全新 ContentPort 重新执行本地 `prepare_catalog`，验证新的临时 handle；这是真实额外调用，计入 content 次数和已报告用量，必须返回 `provider_requests=0`。辅助身份独立于历史 ID 流。未知用量保持 null；违反本地调用契约也不能抹去已报告的实际 provider 请求。
 
@@ -365,7 +365,7 @@ class ContentPort(Protocol):
 
 ### `search`（运行控制器 → 内容模块）
 
-该本地检索调用只带 `CallContext`。A/C 请求字段保持原样：原问题、`subtask`（含当前查询 `search_query`）、`catalog_snapshot_id`、`catalog_handle`、已访问 `source_id`、`source_id_filter`（可为 null）、`limit`。控制器把模型 `search` 动作的 query 放入既有 `subtask` 字段；它是本次检索的兼容封装，不要求模型先拆分任务。source_ids 由模型动作选择并映射到 source_id_filter，运行控制器先校验其属于目录；显式空数组表示空范围，null 表示整个目录。`limit` 不得大于 `candidate_top_k`。内容模块必须确认 handle 对应给定快照；运行控制器校验候选的 `source_id` 属于该完整目录及过滤集合（若提供）。`search` 不调用模型，usage 中 token 记为 0。
+该本地检索调用只带 `CallContext`。数据处理模块与内容模块的请求字段保持原样：原问题、`subtask`（含当前查询 `search_query`）、`catalog_snapshot_id`、`catalog_handle`、已访问 `source_id`、`source_id_filter`（可为 null）、`limit`。控制器把模型 `search` 动作的 query 放入既有 `subtask` 字段；它是本次检索的兼容封装，不要求模型先拆分任务。source_ids 由模型动作选择并映射到 source_id_filter，运行控制器先校验其属于目录；显式空数组表示空范围，null 表示整个目录。`limit` 不得大于 `candidate_top_k`。内容模块必须确认 handle 对应给定快照；运行控制器校验候选的 `source_id` 属于该完整目录及过滤集合（若提供）。`search` 不调用模型，usage 中 token 记为 0。
 
 输出数据：`candidates` 不超过请求的 `limit`，`source_id` 不重复，`score` 是有限的 0–1 排序分数；无结果返回空数组。
 
@@ -383,7 +383,7 @@ class ContentPort(Protocol):
 
 除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、`completed_subtasks` 和带定位的 `EvidenceRecord[]`。completed_subtasks 是可选计划中由模型标记完成的摘要，可以为空；evidence 也可以为空，用于目录说明、澄清或资料不足说明。正文事实不得超出实际可用输入，不能编造引用。当前 `token_budget.max_output_tokens_this_call` 为 null，不构成输出 token 上限；未来启用该上限时，内容模块不得覆盖或扩大其非 null 值。
 
-`ComposeRequest.revision: AnswerRevision | None` 是默认空的增量字段，None 时序列化省略；首次生成继续接收原有业务字段。有旧答案时，控制器发送以下修订信息，使无状态 C 不必依赖内部会话：
+`ComposeRequest.revision: AnswerRevision | None` 是默认空的增量字段，None 时序列化省略；首次生成继续接收原有业务字段。有旧答案时，控制器发送以下修订信息，使无状态内容模块不必依赖内部会话：
 
 | revision 字段 | 含义 |
 |---|---|
@@ -392,7 +392,7 @@ class ContentPort(Protocol):
 | `verification_is_current` | 核验是否仍适用于当前完整可信输入；无核验时必须 false |
 | `instructions` | planner 的可选修订目标，非空时为1–4000字符 |
 
-这些数据不替代 question 或 evidence，不具有授权、预算或修改 require_verification 的效力；历史核验过期时只能当作历史参考。控制器不把失败核验伪装成 EvidenceRecord。C 必须把 revision 内容放进提供方的 messages，并遵守当前完整证据与运行契约。本文只描述仓库已实现的隔离内容适配器，外部真实 C 需要升级共享模型和实际模型消息构造，不因 Python 多了字段就自动支持。旧版 extra=forbid 消费者会拒绝非空 revision，应先升级再联调；不静默丢弃修订数据。
+这些数据不替代 question 或 evidence，不具有授权、预算或修改 require_verification 的效力；历史核验过期时只能当作历史参考。控制器不把失败核验伪装成 EvidenceRecord。内容模块必须把 revision 内容放进提供方的 messages，并遵守当前完整证据与运行契约。本文只描述仓库已实现的隔离内容适配器，待接入的生产内容模块需要升级共享模型和实际模型消息构造，不因 Python 多了字段就自动支持。旧版 extra=forbid 消费者会拒绝非空 revision，应先升级再联调；不静默丢弃修订数据。
 
 输出 `AnswerRecord`：
 
@@ -426,21 +426,21 @@ class ContentPort(Protocol):
 }
 ```
 
-`verdict` 为 `supported`、`insufficient`、`conflicting` 或 `invalid_citation`；`recommendation.action` 为 `none`、`compose_again`、`search_more`、`query_again` 或 `stop`。`focus` 给出建议标识 `subtask_id`、查询、来源或缺失字段。为保持 C 的既有请求/响应结构，`search_more`/`query_again` 仍须提供 focus 和非空 subtask_id；该标识不要求来自模型的可选计划，也不触发自动子任务重访。控制器校验引用及目录来源后，把完整建议作为下一轮模型观察。内容模块不决定动作路由，验证超时或错误绝不能解释为 supported。
+`verdict` 为 `supported`、`insufficient`、`conflicting` 或 `invalid_citation`；`recommendation.action` 为 `none`、`compose_again`、`search_more`、`query_again` 或 `stop`。`focus` 给出建议标识 `subtask_id`、查询、来源或缺失字段。为保持内容模块的既有请求/响应结构，`search_more`/`query_again` 仍须提供 focus 和非空 subtask_id；该标识不要求来自模型的可选计划，也不触发自动子任务重访。控制器校验引用及目录来源后，把完整建议作为下一轮模型观察。内容模块不决定动作路由，验证超时或错误绝不能解释为 supported。
 
 ### 内容输出诊断与显式修正扩展
 
 `ErrorInfo.details: JsonObject | None` 是可选的有界 JSON 诊断；None 时序列化省略该字段。内容输出校验可记录 `issues[].path/code/actual/expected`、允许的证据/来源 ID 预览、`rejected_output` 和 `omitted`。path 使用 JSON Pointer；详情最大8000字节，还受单次响应总大小限制，省略项不能作为完整授权集合。不得在诊断中写 HTTP 鉴权、私有连接封装或任意原始异常文本。
 
-C 只有声明 `content_feedback_protocol = CONTENT_FEEDBACK_PROTOCOL`（精确值 `"content-feedback-v1"`）后才会收到扩展请求：`ComposeFeedbackRequest(ComposeRequest)`、`VerifyFeedbackRequest(VerifyRequest)` 各增加必填 `feedback: ContentFeedback`。反馈含此前同阶段的 `phase/call_id/error`。这与 ComposeRequest 中默认空的 revision 是不同扩展：revision 传递旧答案及合法核验意见，feedback 传递非法输出的诊断。未声明能力的模块不接收 feedback 字段；旧的 extra=forbid 消费者仍需升级共享修订模型，若还需输出错误纠正，再实现反馈处理并声明能力。未知声明不构成支持。
+内容模块只有声明 `content_feedback_protocol = CONTENT_FEEDBACK_PROTOCOL`（精确值 `"content-feedback-v1"`）后才会收到扩展请求：`ComposeFeedbackRequest(ComposeRequest)`、`VerifyFeedbackRequest(VerifyRequest)` 各增加必填 `feedback: ContentFeedback`。反馈含此前同阶段的 `phase/call_id/error`。这与 ComposeRequest 中默认空的 revision 是不同扩展：revision 传递旧答案及合法核验意见，feedback 传递非法输出的诊断。未声明能力的模块不接收 feedback 字段；旧的 extra=forbid 消费者仍需升级共享修订模型，若还需输出错误纠正，再实现反馈处理并声明能力。未知声明不构成支持。
 
 显式支持后，`invalid_model_citations`、`invalid_model_sources`、`invalid_model_output` 这些已知模型输出错误可交回 decide。控制器也校验 status=ok 响应中的引用；拒绝输出不覆盖有效答案或核验，未解决反馈使 finish 返回 `unresolved_content_failure` 拒绝观察。同阶段输出成功清除反馈；接纳不同的新答案时，另外清除针对旧答案的 verify 输出反馈与核验收据，相同答案不能借此清除原状态。模型继续自由选择动作。
 
-规划模型通过既有 context 接收反馈，内容模型则通过扩展请求接收；二者不共享隐式聊天历史。C 应把动态 feedback 放进提供方的 `messages[].content`，不新增 HTTP 顶层参数、不改原 question、不伪造 evidence。每个内容调用仍最多一个模型请求；修正是新的受预算调用，不由 adapter 内部循环重试。HTTP/鉴权/传输/超时/提供方封装与端口契约错误维持终止，旧模块也不因 retryable/recoverable 标志就获得内容纠错能力。完整样例见[内容反馈说明](content-feedback.md)。
+规划模型通过既有 context 接收反馈，内容模型则通过扩展请求接收；二者不共享隐式聊天历史。内容模块应把动态 feedback 放进提供方的 `messages[].content`，不新增 HTTP 顶层参数、不改原 question、不伪造 evidence。每个内容调用仍最多一个模型请求；修正是新的受预算调用，不由 adapter 内部循环重试。HTTP/鉴权/传输/超时/提供方封装与端口契约错误维持终止，旧模块也不因 retryable/recoverable 标志就获得内容纠错能力。完整样例见[内容反馈说明](content-feedback.md)。
 
 ## 5. 统一规划器请求与动作
 
-规划器属于 B 内部适配器，A/C 无需实现。唯一端口为：
+规划器属于运行时内部适配器，待接入模块无需实现。唯一端口为：
 
 ```python
 class AgentPlannerPort(Protocol):
@@ -469,7 +469,7 @@ class AgentPlannerPort(Protocol):
 - 工具参数须符合本地 Draft 2020-12 schema，参数路径提取的来源集合须精确等于 source_ids，并全部属于完整冻结目录。模型可以直接选择目录中来源，不要求先搜索。
 - `plan` 只替换可选 subtasks 和 completed_subtask_ids，可为空。Subtask 的 subtask_id/objective/search_query 必填，required_evidence/depends_on 默认空数组；计划 ID 唯一、依赖存在且无环。完成 ID 必须属于本次计划。它记录工作进展，不建立固定的工具执行顺序。
 - 超出剩余工具步骤的动作整体以 budget_exceeded/step_budget 停止，不截断后执行。执行动作、观察读取及内容调用都仍消耗各自时间和调用预算。
-- `compose` 通过 C 生成或修订答案，可带默认空的 revision_instructions（1–4000字符），控制器把它放入 revision.instructions。没有旧答案却请求修订时，返回 revision_answer_required 拒绝观察且不调用 C；普通首次 compose 不受影响。
+- `compose` 通过内容模块生成或修订答案，可带默认空的 revision_instructions（1–4000字符），控制器把它放入 revision.instructions。没有旧答案却请求修订时，返回 revision_answer_required 拒绝观察且不调用内容模块；普通首次 compose 不受影响。
 - `finish` 是提交已有答案的完成提议，不替模型自动生成答案；最终是否接受由控制器按当前政策判断。无答案 finish/verify 作为拒绝反馈返回模型，允许下一轮修正。
 
 一个合法工具动作响应：
@@ -588,7 +588,7 @@ max_subtasks 只约束可选计划大小；max_plan_steps 与 call_counts.steps 
 | `insufficient` / `conflicting` | `search_more` / `query_again` / `stop` / `none` | 保存失败核验及建议，交回模型；同一答案不能直接 finish 成功 |
 | `invalid_citation` | `compose_again` / `stop` | 保存失败核验及建议，交回模型；实际动作继续经过控制器 |
 
-C 的现有 focus schema 保持不变：search_more 必须含非空 subtask_id/query，query_again 另需非空 source_ids；compose_again/none/stop 的 focus 必须为 null。控制器校验 issue.evidence_ids 和 focus.source_ids，不强制根据建议重访某个固定子任务。建议中的 none/stop 都不是 supported 的替代证明。
+内容模块的现有 focus schema 保持不变：search_more 必须含非空 subtask_id/query，query_again 另需非空 source_ids；compose_again/none/stop 的 focus 必须为 null。控制器校验 issue.evidence_ids 和 focus.source_ids，不强制根据建议重访某个固定子任务。建议中的 none/stop 都不是 supported 的替代证明。
 
 require_verification=true 时，finish 必须已有当前有效的 supported 核验。旧结果存在但指纹不匹配时返回 agent.action.rejected/verification_stale；缺失核验或当前核验不支持时返回 verification_required，并提供继续 verify 或修订的原因。新增或改变证据、完整答案变化会使旧核验过期；过期不等同于当前答案已被证明不支持。完全相同的再次生成保留相同输入上的失败判定，不能靠重复 compose 清洗。工具、目录读取、搜索或计划操作若没有改变核验相关状态，也不会仅因发生一次调用就使结果过期。
 

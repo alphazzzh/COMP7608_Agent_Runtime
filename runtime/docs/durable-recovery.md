@@ -149,4 +149,4 @@ uv run --extra dev --extra web --frozen pytest -q tests/recovery
 
 ## 自主决策引擎的恢复边界
 
-当前唯一支持 agent-loop-v1，不再保留旧子任务图或协议回退。planner.decide 请求和严格动作响应进入同一调用账本；已完成决策在恢复时复用，不重新询问模型。持久状态保存 planner_engine，重建前检查当前规划器的协议声明。协议变化使用 recovery_engine_mismatch 拒绝，源码或依赖变化仍使用 recovery_version_mismatch。上下文不含瞬时时钟/审计序号，决策轮数与有界页面从已知响应确定性重建；不能重置 max_agent_turns、模型调用数或原运行期限。A/C 端口的恢复协议不变。日常 require_verification=false 和实验 full_agent=true/no_verifier=false 的策略均写入原 RunConfig，恢复不能改变策略；固定检索评估基线不作为应用执行模式暴露，而由测试侧本地策略复用相同控制器；评估脚本不启用 SQLite 恢复。
+当前唯一支持 agent-loop-v1，不再保留旧子任务图或协议回退。planner.decide 请求和严格动作响应进入同一调用账本；已完成决策在恢复时复用，不重新询问模型。持久状态保存 planner_engine，重建前检查当前规划器的协议声明。协议变化使用 recovery_engine_mismatch 拒绝，源码或依赖变化仍使用 recovery_version_mismatch。上下文不含瞬时时钟/审计序号，决策轮数与有界页面从已知响应确定性重建；不能重置 max_agent_turns、模型调用数或原运行期限。数据处理模块与内容模块端口的恢复协议不变。日常 require_verification=false 和实验 full_agent=true/no_verifier=false 的策略均写入原 RunConfig，恢复不能改变策略；固定检索评估基线不作为应用执行模式暴露，而由测试侧本地策略复用相同控制器；评估脚本不启用 SQLite 恢复。

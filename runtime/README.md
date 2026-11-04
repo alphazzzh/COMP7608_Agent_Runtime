@@ -6,7 +6,7 @@
 
 | 目标 | 入口 |
 |---|---|
-| 首次配置或接入队友 A/C 模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
+| 首次配置或了解待接入模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
 | 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
 | 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
 | 理解中断后能否继续、哪些调用不会重发 | [持久恢复](docs/durable-recovery.md) |
@@ -28,15 +28,15 @@ uv run --extra web --frozen lake-agent-web --config config.toml
 
 打开配置的本机地址，默认 http://127.0.0.1:8765 。`--port`、`--data-dir` 可覆盖配置。配置中的存储路径相对于配置文件解释；显式命令行路径相对于启动目录解释。保持终端运行，`Ctrl+C` 关闭。
 
-配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出，不回退到测试替身。完整配置、密钥读取、工厂签名与客户端所有权见 [configuration.md](docs/configuration.md)。当前仓库未提供队友的真实 DataPort/ContentPort，实现与凭据必须由实际集成方提供。
+配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出，不回退到测试替身。完整配置、密钥读取、工厂签名与客户端所有权见 [configuration.md](docs/configuration.md)。当前仓库未提供待接入模块的生产 DataPort/ContentPort 实现，具体实现与凭据必须由实际集成方提供。
 
-队友模块未完成时，可以在源码目录独立测试 B。配置好 `[llm]` 和密钥后，手动运行：
+待接入模块未就绪时，可以在源码目录独立测试运行时。配置好 `[llm]` 和密钥后，手动运行：
 
 ```bash
 uv run --extra web --frozen python -m tests.isolated_runtime --config config.toml --web
 ```
 
-此入口使用真实控制器；规划、回答生成和核验实际调用配置中的 LLM。数据和本地检索由测试依赖提供，无需填写队友的实际工厂；回答接收当前问题和证据，不再使用固定答案或固定成功核验。合成资料和测试适配器身份明确标注，记录保存于独立目录。命令行单问题方式与检查步骤见 [隔离测试说明](docs/configuration.md#队友模块未完成时独立测试-b)。
+此入口使用真实控制器；规划、回答生成和核验实际调用配置中的 LLM。数据和本地检索由测试依赖提供，无需填写待接入模块的实际工厂；回答接收当前问题和证据，不再使用固定答案或固定成功核验。合成资料和测试适配器身份明确标注，记录保存于独立目录。命令行单问题方式与检查步骤见 [隔离测试说明](docs/configuration.md#待接入模块未就绪时的隔离测试)。
 
 ## 模块职责
 
@@ -53,7 +53,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 
 三类适配器通过 [ports.py](src/lake_agent/ports.py) 的进程内异步协议连接，不要求分别部署 HTTP 服务。数据和内容工厂以 `factory(*, options: dict, llm: LLMSettings)` 返回异步上下文管理器，每次 run/resume 获得独立端口并负责清理。规划器按配置构造，向 `{base_url}/chat/completions` 发送一次异步请求，不自动重试。
 
-`JsonPlanner` 的 `decide()` 选择下一步行动，不执行工具或替 C 生成答案，只提供这一种模型决策接口。最终回答和核验需要真实 ContentPort；不得将真实规划器配合测试内容的运行描述为完整 Agent 已联调。模型名、采样参数只在 `[llm]` 声明，`[run]` 复用 [RunConfig](src/lake_agent/models.py) 的预算字段。
+`JsonPlanner` 的 `decide()` 选择下一步行动，不执行工具或替内容模块生成答案，只提供这一种模型决策接口。最终回答和核验需要真实 ContentPort；不得将真实规划器配合测试内容的运行描述为完整 Agent 已联调。模型名、采样参数只在 `[llm]` 声明，`[run]` 复用 [RunConfig](src/lake_agent/models.py) 的预算字段。
 
 ## 执行、恢复与工作台
 
@@ -63,7 +63,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 
 复杂任务的提示鼓励模型将可选 DAG 计划作为工作记忆，随进展更新完成项；结构未知时先检查目录、schema 或观察分页，再构造过滤与聚合。核验失败后依据 issues/recommendation 定向补证或修改答案，动作顺序仍由模型选择。
 
-核验绑定完整可信输入的确定性指纹：接纳不同答案时清除旧核验收据，状态为 missing；答案未变而证据变化时，旧收据为 stale。只调用工具但未改变验收相关状态不会自动要求再核验。过期只表示旧意见不再适用于当前状态，不表示当前答案已被证明错误。`compose` 的可选 `revision` 向无状态内容模块提供旧答案、相关核验及其新鲜度和修改要求，规划器可通过 `revision_instructions` 指定目标；这些信息进入模型消息，不能改变权限、预算或验收政策。外部真实 C 模块需要升级共享模型并实现该字段，仓库只修改了自身隔离适配器。
+核验绑定完整可信输入的确定性指纹：接纳不同答案时清除旧核验收据，状态为 missing；答案未变而证据变化时，旧收据为 stale。只调用工具但未改变验收相关状态不会自动要求再核验。过期只表示旧意见不再适用于当前状态，不表示当前答案已被证明错误。`compose` 的可选 `revision` 向无状态内容模块提供旧答案、相关核验及其新鲜度和修改要求，规划器可通过 `revision_instructions` 指定目标；这些信息进入模型消息，不能改变权限、预算或验收政策。待接入的生产内容模块需要升级共享模型并实现该字段，仓库只修改了自身隔离适配器。
 
 生成或核验出现非法引用、目录来源越界或模型正文 JSON/schema 错误时，显式声明 `content_feedback_protocol="content-feedback-v1"` 的内容端口可进入自主修正：控制器拒绝当前输出、保存有界诊断，规划器决定下一步；再次调用内容端口时，扩展请求把具体反馈送到模型 `messages`。原问题、证据和 HTTP 顶层参数不混入错误信息，每次调用仍最多请求一次模型。未声明能力的内容端口不接收 feedback 扩展并保留原失败语义，但参与答案修订仍需支持基础请求中的可选 revision；鉴权/传输/契约错误保持停止。无需增加 TOML 配置，协议和恢复边界见[内容错误诊断与修正](docs/content-feedback.md)。
 
@@ -71,7 +71,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 
 | 阅读入口 | 内容 |
 |---|---|
-| [ports.py](src/lake_agent/ports.py) / [models.py](src/lake_agent/models.py) | 队友接口、动作和运行配置 |
+| [ports.py](src/lake_agent/ports.py) / [models.py](src/lake_agent/models.py) | 模块接入接口、动作和运行配置 |
 | [engine/agent_workflow.py](src/lake_agent/engine/agent_workflow.py) | 模型动作与图路由 |
 | [engine/graph_runner.py](src/lake_agent/engine/graph_runner.py) | 图执行、取消及追踪隔离 |
 | [runtime.py](src/lake_agent/runtime.py) / [engine/tool_runtime.py](src/lake_agent/engine/tool_runtime.py) | 授权、预算与工具执行 |

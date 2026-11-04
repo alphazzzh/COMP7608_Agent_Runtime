@@ -28,7 +28,7 @@ runtime/
     web/                           # 工作台、任务管理和报告存储
   tests/
     README.md                      # 分组导航、共享支持代码和离线命令
-    isolated_runtime.py            # B 模块隔离运行入口
+    isolated_runtime.py            # 运行时隔离测试入口
     ablation_runtime.py            # Proposal 三组对照入口
     contracts/                     # 共享模型与接口契约
     adapters/                      # 模型适配、配置读取与工厂接线
@@ -43,12 +43,12 @@ runtime/
 
 ## 保留的公共模块
 
-这些路径保持原样，队友实现 DataPort/ContentPort 或宿主调用运行时不需要依赖 `engine/` 内部状态。
+这些路径保持原样，待接入模块实现 DataPort/ContentPort 或宿主调用运行时不需要依赖 `engine/` 内部状态。
 
 | 文件 | 职责 |
 |---|---|
 | [__init__.py](../src/lake_agent/__init__.py) | 包说明和发布版本 |
-| [models.py](../src/lake_agent/models.py) | A/B/C 共享请求、响应、动作、运行配置和结果；生产 `RunMode` 只有 `full_agent`、`no_verifier` |
+| [models.py](../src/lake_agent/models.py) | 各模块共享请求、响应、动作、运行配置和结果；生产 `RunMode` 只有 `full_agent`、`no_verifier` |
 | [ports.py](../src/lake_agent/ports.py) | DataPort、ContentPort、AgentPlannerPort 与 TraceSink 异步协议 |
 | [runtime.py](../src/lake_agent/runtime.py) | 公共 `run/resume`；每次运行的控制器、授权、预算、调用结算和证据提交 |
 | [config.py](../src/lake_agent/config.py) | 严格读取 TOML、解析密钥来源、校验模型和运行配置；不创建客户端或执行模块 |
@@ -130,7 +130,7 @@ from lake_agent.adapters.planner import JsonPlanner
 | `tests/recovery/` | SQLite 状态、租约、调用重放、预算、取消与恢复兼容性 |
 | `tests/web/` | HTTP/页面策略、生命周期、失败信息、报告和任务管理 |
 | `tests/evaluation/` | 三组消融执行、CLI、统计与报告契约 |
-| [tests/isolated_runtime.py](../tests/isolated_runtime.py) | 源码侧 B 模块隔离 CLI；显式运行时可接真实模型并启动测试工作台 |
+| [tests/isolated_runtime.py](../tests/isolated_runtime.py) | 源码侧运行时隔离 CLI；显式运行时可接真实模型并启动测试工作台 |
 | [tests/ablation_runtime.py](../tests/ablation_runtime.py) | 源码侧三组消融 CLI，使用宿主提供的冻结任务与真实工具映射 |
 | `tests/support/` | 合成端口、隔离执行配置、模型请求构造器、恢复/工作台辅助及消融统计；测试间共享这些模块，不互相导入 `test_*.py` |
 | [scripts/verify_installed_web.py](../scripts/verify_installed_web.py) | 检查安装后的公共导入、CLI、配置和静态资源，不启动服务 |
@@ -139,4 +139,4 @@ from lake_agent.adapters.planner import JsonPlanner
 
 内容修正的共享 ErrorInfo.details、ContentFeedback、请求子类和 RunResult.failure 在 models.py；控制器与图保存反馈并继续模型自主决策，engine/recovery.py 从 SQLite 已知响应重建，web/storage.py 与 app.js 展示当前具体失败和旧历史事件回退。相关回归分别归入契约、适配器、引擎、恢复和工作台分组；协议和兼容规则见[内容反馈说明](content-feedback.md)。
 
-队友接口约定见[运行契约](runtime-contract.md)，三组指标口径见[消融评估说明](ablation-evaluation.md)。
+待接入模块的接口约定见[运行契约](runtime-contract.md)，三组指标口径见[消融评估说明](ablation-evaluation.md)。
