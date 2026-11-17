@@ -250,12 +250,14 @@ class ToolExecutionMixin:
         return None, error, reason
 
     async def _apply_tool_evidence(self, step, result):
-        """在将显式证据纳入运行状态前验证其来源关系。"""
+        """校验显式证据的形状和来源，省略 evidence 的结果仅产生工具观察。
+
+        工具名称不决定证据是否必填。任何工具显式提供 evidence 时，仍须通过
+        数组、条目结构和来源授权检查，普通观察不会自动变成可引用证据。
+        """
         try:
             raw = result.data.get("evidence", [])
-            if not isinstance(raw, list) or (
-                step.tool_name == "extract" and "evidence" not in result.data
-            ):
+            if not isinstance(raw, list):
                 raise ValueError("tool evidence must be an explicit array")
             incoming = [m.EvidencePayload.model_validate(item) for item in raw]
         except (ValidationError, ValueError, TypeError) as exc:

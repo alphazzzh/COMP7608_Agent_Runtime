@@ -254,6 +254,120 @@ async def test_inspect_schema_is_visible_to_next_planner_and_query_supplies_evid
     assert content.compositions[0].evidence[0].payload == "Annual revenue: 120 million HKD."
 
 
+@pytest.mark.parametrize("tool_name", ["inspect", "extract", "query"])
+@pytest.mark.parametrize(
+    ("evidence_fields", "valid"),
+    [
+        pytest.param({}, True, id="omitted"),
+        pytest.param({"evidence": []}, True, id="empty"),
+        pytest.param({"evidence": None}, False, id="null"),
+        pytest.param({"evidence": {}}, False, id="object"),
+        pytest.param({"evidence": [{}]}, False, id="malformed-item"),
+        pytest.param(
+            {
+                "evidence": [
+                    {
+                        "source_id": "demo-quarter",
+                        "content_type": "text",
+                        "payload": "A registered but unauthorized source.",
+                        "locator": {"line": 1},
+                    }
+                ]
+            },
+            False,
+            id="outside-step",
+        ),
+        pytest.param(
+            {
+                "evidence": [
+                    {
+                        "source_id": "not-in-catalog",
+                        "content_type": "text",
+                        "payload": "An unregistered source.",
+                        "locator": {"line": 1},
+                    }
+                ]
+            },
+            False,
+            id="outside-catalog",
+        ),
+    ],
+)
+async def test_tool_evidence_contract_is_independent_of_tool_name(
+    tmp_path, tool_name, evidence_fields, valid
+):
+    """工具名称不决定证据必填性，观察结果不得绕过证据类型和来源检查。"""
+
+    class ObservationData(DemoData):
+        """三个工具名称使用相同声明和响应，以隔离控制器的名称特殊分支。"""
+
+        def tool_specs(self):
+            return [
+                m.ToolSpec(
+                    name=tool_name,
+                    description="Read a local source schema",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"source_id": {"type": "string"}},
+                        "required": ["source_id"],
+                        "additionalProperties": False,
+                    },
+                    idempotent=True,
+                    uses_sources=True,
+                    source_id_paths=["/source_id"],
+                )
+            ]
+
+        async def invoke(self, request):
+            return m.ToolResult(
+                call_id=request.call_id,
+                data={"schema": {"tables": ["annual"]}, **evidence_fields},
+            )
+
+    class ObserveThenStop(DemoPlanner):
+        """读取一次结构后停止，暴露下一轮收到的真实观察和证据上下文。"""
+
+        def __init__(self):
+            self.requests = []
+
+        async def decide(self, request):
+            self.requests.append(request)
+            if len(self.requests) > 1:
+                return reply(request, m.AgentStopDecision(reason="Schema inspection complete"))
+            return reply(
+                request,
+                m.AgentToolsDecision(
+                    steps=[
+                        m.AgentToolStep(
+                            step_id="schema-step",
+                            tool_name=tool_name,
+                            source_ids=["demo-annual"],
+                            args={"source_id": "demo-annual"},
+                            purpose="Inspect the registered source schema",
+                        )
+                    ]
+                ),
+            )
+
+    planner = ObserveThenStop()
+    result = await execute(tmp_path, planner=planner, data=ObservationData())
+
+    assert result.call_counts.tools == 1
+    assert not any(event["event_type"] == "evidence.added" for event in events(result))
+    if valid:
+        assert (result.status, result.stop_reason) == ("insufficient_evidence", "agent_stopped")
+        assert len(planner.requests) == 2
+        context = planner.requests[1].context
+        assert context["evidence_summary"] == []
+        assert len(context["tool_observations"]) == 1
+        observation = context["tool_observations"][0]
+        assert observation["tool_name"] == tool_name
+        assert observation["result"]["data"]["schema"] == {"tables": ["annual"]}
+    else:
+        assert (result.status, result.stop_reason) == ("failed", "invalid_module_response")
+        assert len(planner.requests) == 1
+
+
 async def test_planner_context_is_byte_bounded_while_compose_and_verify_keep_full_evidence(
     tmp_path,
 ):

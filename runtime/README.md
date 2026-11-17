@@ -7,6 +7,7 @@
 | 目标 | 入口 |
 |---|---|
 | 首次配置或了解待接入模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
+| 检查队友数据模块的接入状态 | [数据模块接入审查与联调说明](docs/data-module-integration-review-2026-11-16.md) |
 | 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
 | 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
 | 理解中断后能否继续、哪些调用不会重发 | [持久恢复](docs/durable-recovery.md) |
