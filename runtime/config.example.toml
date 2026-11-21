@@ -1,4 +1,4 @@
-# 服务端配置样例。复制为 config.toml 后填写真实模型和团队适配器。
+# 服务端配置样例。复制为 config.toml 后填写真实模型、本地数据目录和内容端口。
 # 本文件不含凭据；config.toml 与 config.*.toml 默认不提交。
 # 配置加载不会进入适配器或请求模型；实际任务执行时才创建客户端。
 
@@ -25,13 +25,14 @@ dataset_id = "project-data"
 dataset_name = "项目数据池"
 revision = "v1"
 
-# 两个工厂必须来自已安装的实际团队模块；这里没有合成数据回退。
-# 签名：factory(*, options: dict, llm: LLMSettings) -> 异步上下文管理器。
 [adapters.data]
-factory = "your_data_module:create_port"
-options = {}
+factory = "lake_agent.adapters.data_adapter:create_port"
+# 替换为实际本地数据目录的绝对路径。
+options = { base_dir = "/path/to/local/dataset" }
 
 [adapters.content]
+# 安装团队内容模块后填写其可导入的工厂路径。
+# 签名为 factory(*, options: dict, llm: LLMSettings)，返回异步上下文管理器。
 factory = "your_content_module:create_port"
 options = {}
 

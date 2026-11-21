@@ -47,9 +47,28 @@ full_agent 只表示可用的自主动作模式，不替代 require_verification
 
 运行日志会记录 planner.decide 和 agent.decision.accepted，可检查模型选择了什么、为何被拒绝、实际调用和引用是否一致。新源码或引擎协议与旧持久运行不兼容时拒绝恢复，旧记录仍可查看。
 
-## 待接入模块的适配器工厂
+## 本地数据端口
 
-本仓库负责 Harness 和规划器，未附带待接入的数据处理模块或内容模块的生产实现。请安装实际模块，并把两个 `factory` 改为它们可导入的 Python 工厂。现有端口仍在同一进程内以异步方法连接，不新增 HTTP 模块协议。
+仓库内置的本地 DataPort 来自队友的数据模块原型，保留了文件目录与文本、CSV、JSON、PDF 证据抽取。运行包随锁文件安装 DuckDB、SQLGlot、pandas 和 pypdf，目录按请求分页。
+
+在私有 `config.toml` 中配置本地文件目录，推荐使用绝对路径。相对 `base_dir` 以进程启动目录为基准。
+
+```toml
+[adapters.data]
+factory = "lake_agent.adapters.data_adapter:create_port"
+options = { base_dir = "/path/to/local/dataset" }
+```
+
+**接入修订（2026-11-21）**
+
+- `query` 只查询当前授权文件注册的 `data` 表，支持受限的 `SELECT`、常用聚合和非递归 CTE。支持 CSV、表格 TXT 和表格 JSON，文件上限为 16 MiB，结果最多 100 行。查询在独立子进程内执行，使用调用时限的 90%，余量用于进程清理。超时或取消时终止并回收子进程。
+- 目录与工具回复使用 Runtime 的规范 JSON UTF-8 字节预算。抽取保留来源和位置，查询按完整行裁剪。按字符、行或字节裁掉证据时报告 `truncated=true`。如果预算只能容纳错误封套，返回 `response_too_large`。
+
+将工作资料与含参考答案的评测题单放在不同目录。`base_dir` 只指向工作资料。课程评估期间使用同一份冻结数据，更新数据后同步修改 `[profile].revision`。
+
+## 数据和内容端口的适配器工厂
+
+使用团队内容端口时，安装其 Python 包，在 `[adapters.content]` 中配置可导入的工厂及其选项。也可用同一协议配置其他数据端口。Harness 在进程内调用两个异步端口。
 
 两种工厂都使用下面的签名：
 
@@ -118,7 +137,7 @@ uv run --frozen python -m tests.isolated_runtime --config config.toml \
 
 “执行过程与原始记录”中的任务选择器按每次提问的 `run_id` 切换，当前问题始终显示在上方。时间线仅包含所选任务，恢复尝试仍归入原任务；连续阶段按原始顺序折叠，可按阶段筛选或搜索事件、工具与编号。完成任务的阶段默认折叠，切换问题会清除旧筛选。新任务使用独立 `task_id=web:{run_id}`；旧恢复任务保留其已保存身份。
 
-此入口仅存在于源码 `tests/`，不会进入生产 wheel；生产 `lake-agent-web` 仍需接入真实数据处理模块与内容模块。
+此入口仅存在于源码 `tests/`。正式的 `lake-agent-web` 由配置选择数据和内容端口。
 
 源码归档后，上面的启动命令和 `lake_agent.config.load_config`、`lake_agent.runtime.run/resume` 路径不变。真实规划器位于 `lake_agent.adapters.planner`，图和恢复实现在 `lake_agent.engine`，外部实验报告模型位于 `lake_agent.evaluation.models`；详情见[源码目录与职责](source-layout.md)。这些目录都不包含合成数据或固定检索执行策略。
 
@@ -134,7 +153,7 @@ export MODEL_API_KEY="你的实际服务端密钥"
 uv run --extra web --frozen lake-agent-web --config config.toml
 ```
 
-可用 `--port`、`--data-dir` 覆盖配置。显式 `--data-dir` 相对于当前启动目录解释；配置文件中的路径仍相对于配置文件解释。
+可用 `--port`、`--data-dir` 覆盖配置。显式 `--data-dir` 相对于当前启动目录解释；配置中的 `server.data_dir` 相对于配置文件所在目录解释。
 
 正式网页只开放 full_agent；关闭核验和实验评估仅在显式测试宿主中启用，服务端也会拒绝被禁用的模式与评估请求。网页只接收问题、允许的模式和已注册 profile 的 ID，不接收 API key、工厂路径或私有选项。未显式指定 profile 时，仅当注册表中恰有一个配置才自动选择；多个配置要求用户选择。
 
@@ -144,4 +163,4 @@ uv run --extra web --frozen lake-agent-web --config config.toml
 
 测试替身与共享请求构造器位于 `tests/support/`，不随生产 wheel 分发。共享模型契约位于 `tests/contracts/`，配置加载、工厂接线和模型请求适配位于 `tests/adapters/`，工作台接入位于 `tests/web/`；目录及命令见[测试导航](../tests/README.md)。pytest 使用内存 HTTP transport 验证真实规划器请求格式、鉴权头、模型和参数，并验证配置加载、模块生命周期及异常路径，不访问外部 API。安装验证脚本也不启动服务器。
 
-这类验证不证明用户凭据可用、实际提供方响应兼容，或生产数据处理模块与内容模块的答案质量。运行时可以先按上述隔离入口连接真实规划模型；完整系统的真实问题、资料不足、网络失败与引用定位验收仍需待接入模块的生产实现。
+真实问题、资料不足、网络失败和引用定位的端到端验收，需要配置实际数据目录、团队内容端口及模型服务。

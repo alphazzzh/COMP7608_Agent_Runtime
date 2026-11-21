@@ -7,7 +7,7 @@
 | 目标 | 入口 |
 |---|---|
 | 首次配置或了解待接入模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
-| 检查队友数据模块的接入状态 | [数据模块接入审查与联调说明](docs/data-module-integration-review-2026-11-16.md) |
+| 配置内置本地数据端口或查阅接入前的审查 | [本地数据端口](docs/configuration.md#本地数据端口) · [接入前审查](docs/data-module-integration-review-2026-11-16.md) |
 | 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
 | 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
 | 理解中断后能否继续、哪些调用不会重发 | [持久恢复](docs/durable-recovery.md) |
@@ -20,7 +20,7 @@
 
 1. 在本目录安装依赖：`uv sync --extra dev --extra web --frozen`。
 2. 将 [config.example.toml](config.example.toml) 复制为私有 `config.toml`，填写真实 API 地址、模型名和密钥来源。
-3. 安装实际数据与内容模块，将 `[adapters.data/content].factory` 改为它们可导入的 `module:function` 工厂，并填写私有 options。
+3. 在 `[adapters.data].options.base_dir` 填写本地数据目录的绝对路径。安装团队内容模块，在 `[adapters.content]` 填写其工厂和私有选项。使用其他数据端口时，在 `[adapters.data]` 填写对应工厂和选项。
 4. 准备好模块与配置后，手动执行：
 
 ```bash
@@ -29,7 +29,7 @@ uv run --extra web --frozen lake-agent-web --config config.toml
 
 打开配置的本机地址，默认 http://127.0.0.1:8765 。`--port`、`--data-dir` 可覆盖配置。配置中的存储路径相对于配置文件解释；显式命令行路径相对于启动目录解释。保持终端运行，`Ctrl+C` 关闭。
 
-配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出，不回退到测试替身。完整配置、密钥读取、工厂签名与客户端所有权见 [configuration.md](docs/configuration.md)。当前仓库未提供待接入模块的生产 DataPort/ContentPort 实现，具体实现与凭据必须由实际集成方提供。
+配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出。内置本地数据端口沿用队友提交的目录和文件抽取原型，并支持单文件表格查询。完整联调需要团队内容端口和模型凭据。[配置与工厂说明](docs/configuration.md)
 
 待接入模块未就绪时，可以在源码目录独立测试运行时。配置好 `[llm]` 和密钥后，手动运行：
 
