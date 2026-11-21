@@ -66,9 +66,25 @@ options = { base_dir = "/path/to/local/dataset" }
 
 将工作资料与含参考答案的评测题单放在不同目录。`base_dir` 只指向工作资料。课程评估期间使用同一份冻结数据，更新数据后同步修改 `[profile].revision`。
 
+## 内置内容端口
+
+内容端口来自队友交付的 `verifier(2).zip`。目录检索按来源路径、文件名、摘要及元数据的词项重合排序，支持中文双字词。答案生成与核验使用 `[llm]` 指定的 Chat Completions 服务，服务需支持 JSON object 响应格式。
+
+```toml
+[adapters.content]
+factory = "lake_agent.adapters.content_adapter:create_port"
+options = { enable_model_compose = true, enable_model_verify = true }
+```
+
+**内容核验与评估接入修订（2026-11-21）**
+
+- 核验模型只收到与本次证据有关的来源 ID。Runtime 负责核对建议来源与已注册目录。
+- 生成和核验读取 Runtime 提供的反馈，继续使用原有调用额度。端口转发单次输出 Token 上限并报告服务商实际用量。
+- LakeQA 清单转换和固定检索工具映射由离线评估入口提供。详见[消融评估](ablation-evaluation.md)。
+
 ## 数据和内容端口的适配器工厂
 
-使用团队内容端口时，安装其 Python 包，在 `[adapters.content]` 中配置可导入的工厂及其选项。也可用同一协议配置其他数据端口。Harness 在进程内调用两个异步端口。
+安装替代实现后，在 `[adapters.data]` 或 `[adapters.content]` 填写对应的可导入工厂及其选项。Harness 在进程内调用两个异步端口。
 
 两种工厂都使用下面的签名：
 
@@ -101,7 +117,7 @@ async def create_port(*, options: dict, llm: LLMSettings):
 
 声明后，已知的引用、来源或模型正文 JSON/schema 错误可作为观察交回规划器。模型再次选择同阶段调用时，内容端口接收此前失败的 `call_id`、错误详情和被拒输出预览，并将它们放入下一次提供方 `messages[].content`。HTTP 顶层不新增专用参数，原始 question 和 evidence 不被改写。鉴权、传输、超时与契约错误仍停止，单次内容调用不在内部多请求模型。
 
-所有修正消耗原 max_agent_turns、max_model_calls 和运行期限，未解决反馈不允许 finish；强制核验和 no_verifier 规则不变。SQLite 记录能力与反馈，能力变化拒绝恢复；核验适用状态由已保存请求和响应确定性重建，源码升级仍须通过既有恢复指纹检查，不提供旧任务绕过通道。诊断字段、模块接入和页面行为详见[内容反馈说明](content-feedback.md)。源码隔离端口已经实现 revision 与显式反馈协议，待接入的生产内容模块仍需升级与验证。
+所有修正消耗原 max_agent_turns、max_model_calls 和运行期限，未解决反馈不允许 finish；强制核验和 no_verifier 规则不变。SQLite 记录能力与反馈，能力变化拒绝恢复；核验适用状态由已保存请求和响应确定性重建，源码升级仍须通过既有恢复指纹检查，不提供旧任务绕过通道。诊断字段、模块接入和页面行为详见[内容反馈说明](content-feedback.md)。内置内容端口和源码隔离端口均实现 revision 与显式反馈协议。
 
 ## 待接入模块未就绪时的隔离测试
 

@@ -44,20 +44,27 @@ Top-k 等于共享 `RunConfig.candidate_top_k`。具体工具与参数由宿主 
 
 缺少某种标注时省略字段或设 null；没有相关源标注与明确的空集合不同。标签、数值容差和相关源在执行结束后才评分，不进入模型、内容模块或工具输入。只有问题与任务标识进入运行请求。
 
-从 runtime 源码目录手动运行下列命令，才会执行配置中的真实模块/模型；本次验证没有运行它：
+在运行真实 LakeQA 对照前，先在 runtime 源码目录把原始题单转换为一份冻结 JSON。转换只读取题单，用 `nodes` 中的来源作文件级对照标签，并保留数值答案。检查这些 ID 与内置数据端口在选定 `base_dir` 下报告的相对路径一致。
+
+```bash
+uv run --frozen python -m tests.support.lakeqa \
+  /absolute/path/to/lakeqa-mini /absolute/path/to/frozen-manifest.json
+```
+
+下面的命令读取冻结清单并执行配置中的模型与数据端口。
 
 ```bash
 uv run --extra web --frozen python -m tests.ablation_runtime \
   --config config.toml \
-  --manifest /absolute/path/to/frozen-tasks.json \
-  --step-builder evaluation_adapter:build_step \
+  --manifest /absolute/path/to/frozen-manifest.json \
+  --step-builder tests.support.lakeqa:build_step \
   --dataset-id lakeqa-mini-frozen \
   --task-set-id mini-manifest-v1 \
   --repeats 3 \
   --output-dir /absolute/path/to/new-evaluation-directory
 ```
 
-`evaluation_adapter` 由评估宿主提供，映射待接入模块的实际工具；这里没有默认真实数据适配器。输出目录必须不存在，不覆盖历史数据。命令保存 `report.json`（可导入评估工作台）、`details.json`（任务/配置摘要、每组有效配置、逐任务结果、集合和统计定义）以及 `audit/<run_id>/events.jsonl` 和工件。配置摘要不含 API 密钥或连接选项。CLI 错误只报告异常类型，端口进入/退出的错误也不会回显私有文本。
+`tests.support.lakeqa:build_step` 为内置本地数据端口选择问题中的关键词，再对每个固定候选调用一次 `extract`。使用其他数据端口时，由评估宿主提供相应映射。输出目录必须不存在，不覆盖历史数据。命令保存 `report.json`（可导入评估工作台）、`details.json`（任务/配置摘要、每组有效配置、逐任务结果、集合和统计定义）以及 `audit/<run_id>/events.jsonl` 和工件。配置摘要不含 API 密钥或连接选项。CLI 错误只报告异常类型，端口进入/退出的错误也不会回显私有文本。
 
 Python 调用可传入 `ports_factory`、`step_builder`、`trace_factory` 和可选的 `unnecessary(request) -> bool | None` 独立判定器。判定器只用于事后评分；CLI 默认不提供该判定，因此不必要调用率为 null。运行器不读取或更改实际任务的 SQLite，不承诺评估任务中断续跑；生产持久恢复不受影响。
 

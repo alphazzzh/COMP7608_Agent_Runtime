@@ -6,7 +6,7 @@
 
 | 目标 | 入口 |
 |---|---|
-| 首次配置或了解待接入模块 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
+| 首次配置或替换适配器 | [配置与工厂](docs/configuration.md) → [接口契约](docs/runtime-contract.md) |
 | 配置内置本地数据端口或查阅接入前的审查 | [本地数据端口](docs/configuration.md#本地数据端口) · [接入前审查](docs/data-module-integration-review-2026-11-16.md) |
 | 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
 | 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
@@ -20,7 +20,7 @@
 
 1. 在本目录安装依赖：`uv sync --extra dev --extra web --frozen`。
 2. 将 [config.example.toml](config.example.toml) 复制为私有 `config.toml`，填写真实 API 地址、模型名和密钥来源。
-3. 在 `[adapters.data].options.base_dir` 填写本地数据目录的绝对路径。安装团队内容模块，在 `[adapters.content]` 填写其工厂和私有选项。使用其他数据端口时，在 `[adapters.data]` 填写对应工厂和选项。
+3. 在 `[adapters.data].options.base_dir` 填写本地数据目录的绝对路径。样例配置已指向内置数据与内容工厂。使用其他实现时，在对应的 `[adapters.data]` 或 `[adapters.content]` 中填写工厂和选项。
 4. 准备好模块与配置后，手动执行：
 
 ```bash
@@ -29,7 +29,7 @@ uv run --extra web --frozen lake-agent-web --config config.toml
 
 打开配置的本机地址，默认 http://127.0.0.1:8765 。`--port`、`--data-dir` 可覆盖配置。配置中的存储路径相对于配置文件解释；显式命令行路径相对于启动目录解释。保持终端运行，`Ctrl+C` 关闭。
 
-配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出。内置本地数据端口沿用队友提交的目录和文件抽取原型，并支持单文件表格查询。完整联调需要团队内容端口和模型凭据。[配置与工厂说明](docs/configuration.md)
+配置缺失、凭据缺失、字段非法或工厂无法导入时，命令在启动前退出。内置数据端口支持目录、文件抽取与单文件表格查询。内置内容端口负责目录检索、模型生成与核验，使用同一份模型连接配置。[配置与工厂说明](docs/configuration.md)
 
 待接入模块未就绪时，可以在源码目录独立测试运行时。配置好 `[llm]` 和密钥后，手动运行：
 
@@ -64,7 +64,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 
 复杂任务的提示鼓励模型将可选 DAG 计划作为工作记忆，随进展更新完成项；结构未知时先检查目录、schema 或观察分页，再构造过滤与聚合。核验失败后依据 issues/recommendation 定向补证或修改答案，动作顺序仍由模型选择。
 
-核验绑定完整可信输入的确定性指纹：接纳不同答案时清除旧核验收据，状态为 missing；答案未变而证据变化时，旧收据为 stale。只调用工具但未改变验收相关状态不会自动要求再核验。过期只表示旧意见不再适用于当前状态，不表示当前答案已被证明错误。`compose` 的可选 `revision` 向无状态内容模块提供旧答案、相关核验及其新鲜度和修改要求，规划器可通过 `revision_instructions` 指定目标；这些信息进入模型消息，不能改变权限、预算或验收政策。待接入的生产内容模块需要升级共享模型并实现该字段，仓库只修改了自身隔离适配器。
+核验绑定完整可信输入的确定性指纹：接纳不同答案时清除旧核验收据，状态为 missing；答案未变而证据变化时，旧收据为 stale。只调用工具但未改变验收相关状态不会自动要求再核验。过期只表示旧意见不再适用于当前状态，不表示当前答案已被证明错误。`compose` 的可选 `revision` 向无状态内容模块提供旧答案、相关核验及其新鲜度和修改要求，规划器可通过 `revision_instructions` 指定目标；这些信息进入模型消息，不能改变权限、预算或验收政策。内置内容端口会把 revision 发给模型。
 
 生成或核验出现非法引用、目录来源越界或模型正文 JSON/schema 错误时，显式声明 `content_feedback_protocol="content-feedback-v1"` 的内容端口可进入自主修正：控制器拒绝当前输出、保存有界诊断，规划器决定下一步；再次调用内容端口时，扩展请求把具体反馈送到模型 `messages`。原问题、证据和 HTTP 顶层参数不混入错误信息，每次调用仍最多请求一次模型。未声明能力的内容端口不接收 feedback 扩展并保留原失败语义，但参与答案修订仍需支持基础请求中的可选 revision；鉴权/传输/契约错误保持停止。无需增加 TOML 配置，协议和恢复边界见[内容错误诊断与修正](docs/content-feedback.md)。
 
@@ -79,6 +79,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 | [engine/recovery.py](src/lake_agent/engine/recovery.py) | 持久恢复与已知响应重放 |
 | [engine/content_feedback.py](src/lake_agent/engine/content_feedback.py) | 有界输出诊断、引用差异与内容反馈能力识别 |
 | [adapters/planner.py](src/lake_agent/adapters/planner.py) | 真实模型请求、策略提示与动作解析 |
+| [adapters/content_adapter.py](src/lake_agent/adapters/content_adapter.py) | 本地目录检索、答案生成与核验 |
 | [evaluation/models.py](src/lake_agent/evaluation/models.py) | 三组评估报告格式；不执行基线 |
 
 正式工作台支持完整 Agent 提问、来源目录、历史、真正删除任务及 JSON/HTML 报告。关闭核验与评估导入仅由测试宿主显式开启；正式入口默认不构造评估仓库、不创建评估目录。固定检索只在测试评估脚本中作为基线，不是应用运行模式。浏览器不接收凭据、模块导入路径或预算覆盖；配置与工厂留在服务端。来源页只展示注册目录，不等于读取了数据池全文；测试评估页只显示导入的实际结果，未知指标保持 null。页面和 HTTP 接口见 [工作台说明](docs/project-workspace.md)。
