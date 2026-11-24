@@ -201,11 +201,7 @@ class Repository:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, target)
-        fd = os.open(self.manifests, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        self._sync_directory(self.manifests)
 
     async def load(self, run_id):
         return await disk(self._load, run_id)

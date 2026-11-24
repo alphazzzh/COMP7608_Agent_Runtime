@@ -42,7 +42,7 @@ class Model(BaseModel):
 
 
 class PromptVersions(Model):
-    planner: str | None = "planner-v1.1-exploration"
+    planner: str | None = "planner-v1.2-continuation"
     content: str | None = "content-v0.1"
 
 
@@ -62,12 +62,20 @@ class RunConfig(Model):
     max_retries_per_data_operation: NonNegativeInt = 1
     candidate_top_k: PositiveInt = 5
     max_output_bytes_per_call: PositiveInt = 65_536
+    max_evidence_bytes: PositiveInt = 128_000
+    max_external_data_bytes: NonNegativeInt | None = None
     catalog_page_size: PositiveInt = 100
     max_catalog_sources: PositiveInt = 2_000
     max_catalog_bytes: PositiveInt = 2_000_000
     # 以下限制按工作上下文的 UTF-8 JSON 字节计算，不是服务商的 token 限制。
     max_planner_context_bytes: Annotated[int, Field(ge=1024)] = 24_000
     planner_preview_bytes: Annotated[int, Field(ge=256)] = 2_000
+    # 可选内联目录上限；留空时保持旧行为，按上下文剩余空间填充目录。
+    planner_catalog_preview_bytes: NonNegativeInt | None = None
+    planner_catalog_max_sources: NonNegativeInt | None = None
+    # 可选搜索防循环开关与连续搜索上限；默认关闭/留空以保持既有契约测试兼容。
+    deduplicate_searches: bool = False
+    max_consecutive_searches: PositiveInt | None = None
     max_observation_reads: NonNegativeInt = 8
     max_identical_tool_calls: PositiveInt = 2
     # 适配器还必须单独声明工具可并发；已有工具默认继续串行执行。
@@ -89,13 +97,57 @@ class RunConfig(Model):
         return self
 
 
+class RunContinuation(Model):
+    """已冻结的跨轮规划线索；身份与正文共同受 4096 字节的 JSON 边界约束。
+
+    这些字段不声明本轮证据或权限。保留明确的轮次和上一运行身份，
+    让持久请求恢复时能重建原输入，而无需读取宿主随后更新的任务摘要。
+    """
+
+    mission_id: Annotated[str, Field(min_length=1, max_length=100)]
+    cycle: PositiveInt
+    previous_run_id: str | None
+    summary: Annotated[str, Field(max_length=2000)]
+    pending_items: Annotated[list[Annotated[str, Field(max_length=256)]], Field(max_length=8)]
+    artifact_refs: Annotated[list[Annotated[str, Field(max_length=200)]], Field(max_length=8)]
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def bounded_utf8_json(self) -> RunContinuation:
+        """按完整规范 JSON 计量，拒绝无效 Unicode 和任何不能有限编码的值。"""
+        try:
+            encoded = json.dumps(
+                self.model_dump(),
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise ValueError("continuation must be finite UTF-8 JSON") from None
+        if len(encoded) > 4096:
+            raise ValueError("continuation exceeds the 4096-byte limit")
+        return self
+
+
 class RunRequest(Model):
+    """一次有界运行的冻结输入；无交接时保持旧请求序列化字段集合。"""
+
     schema_version: Literal["1.0"] = "1.0"
     task_id: NonEmpty
     question: NonEmpty
     mode: RunMode = "full_agent"
     run_id: NonEmpty | None = None
     config: RunConfig = Field(default_factory=RunConfig)
+    continuation: RunContinuation | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_continuation(self, handler):
+        """可选交接不扩展普通请求的 JSON 形状或恢复记录。"""
+        result = handler(self)
+        if self.continuation is None:
+            result.pop("continuation", None)
+        return result
 
 
 class ErrorInfo(Model):
@@ -251,6 +303,8 @@ class CatalogResult(Model):
     has_more: bool = False
     error: ErrorInfo | None = None
     duration_ms: NonNegativeInt = 0
+    external_bytes_read: NonNegativeInt | None = None
+    external_cost_usd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
 
     @model_validator(mode="after")
     def check_status(self) -> CatalogResult:
@@ -293,6 +347,8 @@ class ToolResult(Model):
     duration_ms: NonNegativeInt = 0
     warnings: list[str] = Field(default_factory=list)
     truncated: bool = False
+    external_bytes_read: NonNegativeInt | None = None
+    external_cost_usd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
 
     @model_validator(mode="after")
     def check_status(self) -> ToolResult:
@@ -576,13 +632,16 @@ class AgentComposeDecision(Model):
 
     kind: Literal["compose"] = "compose"
     revision_instructions: RevisionInstructions | None = None
+    evidence_ids: list[NonEmpty] | None = None
 
     @model_serializer(mode="wrap")
-    def omit_absent_revision_instructions(self, handler):
-        """无定向要求的旧compose动作继续只序列化kind。"""
+    def omit_absent_fields(self, handler):
+        """没有定向修订或证据筛选时保持旧动作的紧凑线形状。"""
         result = handler(self)
         if self.revision_instructions is None:
             result.pop("revision_instructions", None)
+        if self.evidence_ids is None:
+            result.pop("evidence_ids", None)
         return result
 
 
@@ -590,6 +649,15 @@ class AgentVerifyDecision(Model):
     """请求内容适配器校验当前答案与可用证据。"""
 
     kind: Literal["verify"] = "verify"
+    evidence_ids: list[NonEmpty] | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_evidence_ids(self, handler):
+        """没有筛选证据时保持旧 verify 动作的线形状。"""
+        result = handler(self)
+        if self.evidence_ids is None:
+            result.pop("evidence_ids", None)
+        return result
 
 
 class AgentFinishDecision(Model):
@@ -639,6 +707,29 @@ class Versions(Model):
     config_version: NonEmpty
 
 
+class SourceFunnel(Model):
+    """单次运行的来源流转集合，来源 ID 按字典序去重并稳定导出。"""
+
+    searched_sources: list[NonEmpty] = Field(default_factory=list)
+    visited_sources: list[NonEmpty] = Field(default_factory=list)
+    evidence_sources: list[NonEmpty] = Field(default_factory=list)
+    cited_sources: list[NonEmpty] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_sorted_sources(self) -> SourceFunnel:
+        """拒绝重复项，保证 API 与评测报告的来源列表确定。"""
+        for name in (
+            "searched_sources",
+            "visited_sources",
+            "evidence_sources",
+            "cited_sources",
+        ):
+            values = getattr(self, name)
+            if values != sorted(set(values)):
+                raise ValueError(f"{name} must be unique and sorted")
+        return self
+
+
 class RunResult(Model):
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmpty
@@ -655,6 +746,9 @@ class RunResult(Model):
     versions: Versions
     trace_ref: str | None = None
     failure: RunFailure | None = None
+    external_data_bytes_total: NonNegativeInt | None = None
+    external_data_cost_usd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
+    source_funnel: SourceFunnel | None = None
 
     @model_serializer(mode="wrap")
     def omit_absent_failure(self, handler):
@@ -662,6 +756,12 @@ class RunResult(Model):
         result = handler(self)
         if self.failure is None:
             result.pop("failure", None)
+        if self.external_data_bytes_total is None:
+            result.pop("external_data_bytes_total", None)
+        if self.external_data_cost_usd is None:
+            result.pop("external_data_cost_usd", None)
+        if self.source_funnel is None:
+            result.pop("source_funnel", None)
         return result
 
     @model_validator(mode="after")

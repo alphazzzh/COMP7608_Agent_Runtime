@@ -121,14 +121,15 @@ def tool_action(source="demo-annual", step="read-1"):
     }
 
 
-async def execute(actions, *, content=None, **config):
+async def execute(actions, *, data=None, content=None, **config):
     planner, trace = ActionPlanner(actions), MemoryTrace()
+    data = data or DemoData()
     content = content or FlexibleContent()
     result = await run(
         m.RunRequest(
             task_id="agent-test", question="目前有哪些资料？", config=m.RunConfig(**config)
         ),
-        data=DemoData(),
+        data=data,
         content=content,
         planner=planner,
         trace=trace,

@@ -23,6 +23,7 @@
           <button class="nav-item is-active" data-view="workbench" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>智能问答<span class="nav-shortcut">01</span></button>
           <button class="nav-item" data-view="sources"><span class="nav-icon" aria-hidden="true">▤</span>数据来源<span class="nav-shortcut">02</span></button>
           <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true">◷</span>任务历史<span id="nav-history-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="missions" hidden><span class="nav-icon" aria-hidden="true">⟳</span>持续任务<span id="nav-missions-count" class="nav-count">0</span></button>
           <button class="nav-item" data-view="evaluations" hidden><span class="nav-icon" aria-hidden="true">▥</span>实验评估<span class="nav-shortcut">04</span></button>
         </nav>
         <div class="sidebar-section-heading"><span>最近任务</span><button id="refresh-sidebar" class="icon-button" aria-label="刷新任务历史" title="刷新任务历史">↻</button></div>
@@ -90,6 +91,27 @@
           <section id="view-history" class="page-view" aria-labelledby="history-title" hidden>
             <div class="page-heading"><div><p class="eyebrow">PERSISTENT TASK HISTORY</p><h1 id="history-title">每次探索，都有记录<span class="heading-dot">.</span></h1><p class="page-description">回看答案、证据和执行尝试，继续处理可安全恢复的任务。</p></div><button id="refresh-history" class="button button-outline"><span aria-hidden="true">↻</span> 刷新历史</button></div>
             <div class="history-toolbar"><label class="search-field"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="搜索问题、配置或任务 ID" aria-label="搜索任务历史"></label><label class="filter-field"><span>状态</span><select id="history-filter" aria-label="按任务状态筛选"><option value="all">全部状态</option><option value="active">运行中</option><option value="completed">已完成</option><option value="insufficient_evidence">证据不足</option><option value="budget_exceeded">预算停止</option><option value="timeout">超时</option><option value="interrupted">已中断</option><option value="failed">执行错误 / 恢复受阻</option></select></label><span id="history-count" class="muted-caption">0 次任务</span></div><div id="history-list" class="history-list"></div>
+          </section>
+
+          <section id="view-missions" class="page-view" aria-labelledby="missions-title" hidden>
+            <div class="page-heading"><div><p class="eyebrow">PERSISTENT MISSIONS</p><h1 id="missions-title">让任务持续推进<span class="heading-dot">.</span></h1><p class="page-description">创建有界的手动或周期任务，查看额度、交接和每次实际运行。</p></div><button id="refresh-missions" class="button button-outline"><span aria-hidden="true">↻</span> 刷新任务</button></div>
+            <div class="missions-layout">
+              <section class="mission-create panel" aria-labelledby="mission-create-title">
+                <div class="panel-heading"><h2 id="mission-create-title">创建持续任务</h2><span class="muted-caption">额度由服务端再次校验</span></div>
+                <form id="mission-form" class="mission-form">
+                  <label class="mission-field"><span>执行配置</span><select id="mission-profile" name="profile_id" required disabled><option value="">正在读取配置…</option></select><small id="mission-profile-note">只有已就绪配置可以提交。</small></label>
+                  <label class="mission-field"><span>任务标题</span><input id="mission-title" name="title" maxlength="200" required placeholder="例如：每周跟进收入变化"></label>
+                  <label class="mission-field"><span>任务目标</span><textarea id="mission-question" name="question" rows="4" maxlength="2000" required placeholder="描述每次运行需要完成的问题或检查。"></textarea></label>
+                  <label class="mission-field"><span>触发方式</span><select id="mission-schedule" name="schedule"><option value="manual">手动唤醒</option><option value="interval">完成后按周期唤醒</option></select></label>
+                  <label id="mission-interval-field" class="mission-field" hidden><span>周期（秒）</span><input id="mission-interval" name="interval_seconds" type="number" min="1" max="604800" step="1" value="3600"><small>固定延迟周期，单次只能领取一个周期。</small></label>
+                  <div class="mission-limits"><span class="mission-limits-title">累计限制</span><label class="mission-field"><span>最大轮数</span><input id="mission-max-runs" type="number" min="1" max="100" value="10" required></label><label class="mission-field"><span>模型调用</span><input id="mission-max-model-calls" type="number" min="1" max="10000" value="120" required></label><label class="mission-field"><span>数据调用</span><input id="mission-max-data-calls" type="number" min="1" max="10000" value="120" required></label><label class="mission-field"><span>持续时长（秒）</span><input id="mission-max-duration" type="number" min="1" max="604800" value="86400" required></label></div>
+                  <label class="mission-check"><input id="mission-stop-on-completed" type="checkbox" checked><span>首个成功完成后结束任务</span></label>
+                  <button id="create-mission" class="button button-primary" type="submit" disabled>创建持续任务 <span aria-hidden="true">↗</span></button>
+                  <p id="mission-form-note" class="mission-form-note" role="status"></p>
+                </form>
+              </section>
+              <section class="mission-browser" aria-labelledby="mission-list-title"><div class="panel-heading"><h2 id="mission-list-title">任务列表</h2><span id="missions-count" class="muted-caption">0 个任务</span></div><div id="missions-list" class="missions-list"></div><section id="mission-detail" class="mission-detail panel" aria-label="持续任务详情"></section></section>
+            </div>
           </section>
 
           <section id="view-evaluations" class="page-view" aria-labelledby="evaluations-title" hidden>

@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import math
@@ -32,6 +31,7 @@ from ..validation import canonical_json, catalog_digest, validate_tool_specs
 from .agent_protocol import validate_agent_planner
 from .content_feedback import feedback_protocol
 from .errors import RunStopped
+from .execution import await_adapter_response
 
 _JOURNAL_VERSION = 1
 _RECOVERABLE_STOPS = {
@@ -69,6 +69,7 @@ class _CallRecord(m.Model):
     request: m.JsonObject
     auxiliary: bool
     response: m.JsonObject | None = None
+    response_bytes: m.NonNegativeInt | None = None
 
 
 def _request_type(phase, request=None):
@@ -208,7 +209,8 @@ class RecoverySession:
                 reply = kind.model_validate(entry["response"])
                 if (
                     reply.call_id != key
-                    or len(canonical_json(entry["response"])) > parsed.max_output_bytes
+                    or entry.get("response_bytes", len(canonical_json(entry["response"])))
+                    > parsed.max_output_bytes
                 ):
                     raise ValueError("reply ownership or size")
                 if phase == "content.prepare_catalog" and reply.status == "ok":
@@ -311,6 +313,9 @@ class RecoverySession:
             "model_calls_reserved": c.model_calls_reserved,
             "usage": c.usage,
             "snapshot": c.snapshot,
+            # 这里只保存控制器已接受的计划，供跨轮交接展示未完成目标；
+            # 恢复仍重放调用日志，不从此进度快照恢复执行权限或历史证据。
+            "subtasks": [v.model_dump(mode="json") for v in c.subtasks],
             "completed_subtasks": [v.subtask_id for v in c.completed_subtasks],
             "evidence_ids": [v.evidence_id for v in c.evidence],
             "observation_ids": list(c.observations_by_id),
@@ -369,6 +374,7 @@ class RecoverySession:
             c.content.prepare_catalog,
             request,
             m.ModuleResult[m.CatalogHandle],
+            deadline=min(c.deadline, c.loop.time() + request.timeout_ms / 1000),
             auxiliary=True,
         )
         # 重新绑定仍须遵守本地端口契约，但契约违规不能抹去
@@ -454,59 +460,81 @@ class RecoverySession:
         self.calls[request.call_id] = value
         self.prepared.add(request.call_id)
 
-    async def _dispatch(self, phase, method, request, response_type, *, auxiliary=False):
+    async def _dispatch(
+        self,
+        phase,
+        method,
+        request,
+        response_type,
+        *,
+        deadline,
+        auxiliary=False,
+        on_dispatch=None,
+        on_response=None,
+    ):
+        """持久化意图和已知结果；只有实际适配器等待受调用期限约束。"""
         if self.failure:
             raise RunStopped("failed", "state_store_failed")
         self.controller._time()
         if request.call_id not in self.prepared:
             await self._begin(phase, request, auxiliary=auxiliary)
-        # 存储需要 await；提交意图时可能超过原始截止时间。
-        # 仅使用 timeout_at(past_deadline) 仍可能进入协程代码。
-        self.controller._time()
-        deadline = min(
-            self.controller.deadline, self.controller.loop.time() + request.timeout_ms / 1000
+        response = await await_adapter_response(
+            method,
+            request,
+            response_type,
+            deadline=min(deadline, self.controller.deadline),
+            max_output_bytes=request.max_output_bytes,
+            on_dispatch=on_dispatch,
         )
-        owner = asyncio.current_task()
-        cancelled_before = owner.cancelling() if owner is not None else 0
-        try:
-            async with asyncio.timeout_at(deadline):
-                raw = await method(request.model_copy(deep=True))
-            if self.controller.loop.time() >= deadline:
-                raise TimeoutError
-            raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
-            if len(canonical_json(raw)) > request.max_output_bytes:
-                raise ValueError("response exceeds max_output_bytes")
-            response = response_type.model_validate(raw)
-            if response.call_id != request.call_id:
-                raise ValueError("response call_id mismatch")
-            value = {
-                **self.calls[request.call_id],
-                "status": "completed",
-                "response": response.model_dump(mode="json"),
-            }
-            # 每个工作任务都立即提交自己经过验证的响应。其他同批任务缓慢
-            # 或后续追踪失败，都不应抹去已知外部结果。
-            await self._stored(self.store.finish_call, self.lease, request.call_id, value)
-            self.calls[request.call_id] = value
-            if phase == "content.prepare_catalog" and response.status == "ok":
-                self.handles.add(response.data.handle)
-                if not auxiliary:
-                    self.rebind_call = value
-            return response
-        finally:
-            # 对无效返回和存储错误也须保留调用方的取消意图。
-            # 有效响应在执行到这里前已经提交。
-            if owner is not None and owner.cancelling() > cancelled_before:
-                raise asyncio.CancelledError
+        if on_response is not None:
+            on_response(response)
+        response_json = response.model_dump(mode="json")
+        response_bytes = len(canonical_json(response.model_dump(mode="json", exclude_unset=True)))
+        value = {
+            **self.calls[request.call_id],
+            "status": "completed",
+            # 持久化完整响应以保持恢复后的模型语义；大小按适配器原始 JSON
+            # 形状计量，不能因模型补齐默认字段而把合法回复拒绝掉。
+            "response": response_json,
+            "response_bytes": response_bytes,
+        }
+        # 每个工作任务立即保存自己的回复；SQLite 完成已派发写入才传播取消。
+        await self._stored(self.store.finish_call, self.lease, request.call_id, value)
+        self.calls[request.call_id] = value
+        if phase == "content.prepare_catalog" and response.status == "ok":
+            self.handles.add(response.data.handle)
+            if not auxiliary:
+                self.rebind_call = value
+        return response
 
-    async def invoke(self, phase, method, request, response_type):
+    async def invoke(
+        self, phase, method, request, response_type, *, deadline, on_dispatch=None, on_response=None
+    ):
+        """重建时消费同一条已知回复，不重新调用端口。"""
         if request.call_id in self.cached:
             if not await self._guard_match(phase, request):
                 self.failure = "recovery_request_mismatch"
                 raise RunStopped("failed", "state_store_failed")
             self.unseen.discard(request.call_id)
-            return response_type.model_validate(self.calls[request.call_id]["response"])
-        return await self._dispatch(phase, method, request, response_type)
+            response = response_type.model_validate(self.calls[request.call_id]["response"])
+            if on_dispatch is not None:
+                on_dispatch()  # 只重建原工具派发的计数，审计仍标记 replayed。
+            if on_response is not None:
+                on_response(response)
+            return response
+        return await self._dispatch(
+            phase,
+            method,
+            request,
+            response_type,
+            deadline=deadline,
+            on_dispatch=on_dispatch,
+            on_response=on_response,
+        )
+
+    def has_cached_response(self, call_id):
+        """判断某次调用是否已有经过完整性检查的回复，可不受原等待期限限制重放。"""
+        return call_id in self.cached
 
 
 async def durable_run(request, *, data, content, planner, trace, state_store, run_id=None):

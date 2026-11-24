@@ -11,6 +11,7 @@ import importlib
 import sqlite3
 import sys
 import threading
+import weakref
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,30 @@ async def test_one_owner_across_instances_and_stale_token_is_rejected(tmp_path):
     finally:
         await first.aclose()
         await second.aclose()
+
+
+async def test_released_lease_bookkeeping_does_not_grow_with_run_history(tmp_path):
+    """逐次释放后，长进程不应永久保留每个历史租约对象。"""
+    api = state_api()
+    store = api.SqliteStateStore(tmp_path / "many-runs.sqlite3")
+    try:
+        old = await store.create("same-run", {"version": 1})
+        await store.release(old)
+        history = []
+        for index in range(20):
+            lease = await store.create(f"run-{index}", {})
+            history.append(weakref.ref(lease))
+            await store.release(lease)
+            del lease
+        current = await store.acquire("same-run")
+        assert all(ref() is None for ref in history)
+        await store.release(old)
+        assert (await store.load(current)).state == {"version": 1}
+        await store.aclose()
+        await store.release(old)
+        await store.release(current)
+    finally:
+        await store.aclose()
 
 
 async def test_duplicate_runs_and_absent_runs_are_rejected(tmp_path):

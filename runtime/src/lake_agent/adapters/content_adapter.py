@@ -34,9 +34,12 @@ _ANSWER = TypeAdapter(m.AnswerRecord)
 _VERIFICATION = TypeAdapter(m.Verification)
 _COMPOSE_PROMPT = (
     "Answer the question using the supplied evidence. Cite evidence_id values for all material "
-    "claims. If evidence is insufficient, state what cannot be resolved. When revision is "
-    "present, review the previous answer, verification and revision instructions against the "
-    "current evidence. Historical verification does not establish current support."
+    "claims. When the evidence establishes a definitive answer, put the concise final answer "
+    "value (a bare number, year, name, or short phrase without surrounding explanation) in "
+    "structured_result; leave structured_result null when evidence is insufficient. If evidence "
+    "is insufficient, state what cannot be resolved. When revision is present, review the "
+    "previous answer, verification and revision instructions against the current evidence. "
+    "Historical verification does not establish current support."
 )
 _VERIFY_PROMPT = (
     "Check whether the answer resolves the question and each material claim is supported "

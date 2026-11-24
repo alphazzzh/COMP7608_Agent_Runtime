@@ -68,6 +68,23 @@ _QUERY_NODES = frozenset(
         exp.Round,
         exp.Case,
         exp.If,
+        exp.Substring,
+        exp.Sqrt,
+        exp.Abs,
+        exp.Stddev,
+        exp.StddevPop,
+        exp.StddevSamp,
+        exp.Variance,
+        exp.Lower,
+        exp.Upper,
+        exp.Trim,
+        exp.Length,
+        exp.Cast,
+        exp.DataType,
+        exp.DataTypeParam,
+        exp.Pow,
+        exp.Ceil,
+        exp.Floor,
     }
 )
 

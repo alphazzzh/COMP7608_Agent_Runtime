@@ -18,15 +18,25 @@ from uuid import uuid4
 
 from lake_agent import models as m
 from lake_agent.evaluation.models import EvaluationImport
-from lake_agent.ports import TraceSink
+from lake_agent.ports import DataPort, TraceSink
 from lake_agent.runtime import run
 from lake_agent.validation import canonical_json
 from lake_agent.web.profiles import ExecutionPorts
 
-from .ablation_metrics import EvaluationTask, aggregate, score_sample
+from .ablation_metrics import (
+    DataUsage,
+    EvaluationSample,
+    EvaluationTask,
+    aggregate,
+    failure_category_summary,
+    failure_diagnostic_summary,
+    metric_coverage,
+    score_sample,
+)
 
 MODES = ("fixed_retrieval", "no_verifier", "full_agent")
 StepBuilder = Callable[[m.Candidate, list[m.ToolSpec], str, int], m.AgentToolStep]
+DataUsageProvider = Callable[[DataPort, str], DataUsage | None]
 
 
 class CapturingTrace:
@@ -62,40 +72,59 @@ class CapturingTrace:
 
 
 class FixedRetrievalPlanner:
-    """评估固定策略；工具名和参数映射必须由评估宿主提供，核心不预设 extract。"""
+    """每个样本新建的固定策略；生成被拒后结束，不能回到搜索或工具阶段。"""
 
     agent_protocol = m.AGENT_PROTOCOL
 
     def __init__(self, step_builder: StepBuilder):
         self.step_builder = step_builder
+        self.stage = "search"
 
     async def decide(self, request):
+        """最多一次搜索、一次逻辑工具批次和一次生成；批次内重试由控制器负责。"""
         context = request.context
         last = context.get("last_action") or {}
-        if context["has_answer"]:
-            action = m.AgentFinishDecision()
-        elif last.get("kind") == "tools":
-            action = m.AgentComposeDecision()
-        elif last.get("kind") == "search":
+        if self.stage == "search":
+            action = m.AgentSearchDecision(query=request.question)
+            self.stage = "retrieval"
+        elif self.stage == "retrieval":
             candidates = context.get("candidates")
-            if not isinstance(candidates, list) or len(candidates) != last.get("count"):
+            if (
+                last.get("kind") != "search"
+                or last.get("status") != "ok"
+                or not isinstance(candidates, list)
+                or len(candidates) != last.get("count")
+            ):
                 # 固定对照不能悄悄改 top-k；上下文不足需明确失败而不是取被截短集合。
                 action = m.AgentStopDecision(reason="Fixed candidate list exceeds context budget")
+                self.stage = "finish"
             elif candidates:
+                candidate_rows = [m.Candidate.model_validate(value) for value in candidates]
                 steps = [
-                    self.step_builder(
-                        m.Candidate.model_validate(value),
-                        request.tool_specs,
-                        request.question,
-                        index,
-                    )
-                    for index, value in enumerate(candidates)
+                    self.step_builder(candidate, request.tool_specs, request.question, index)
+                    for index, candidate in enumerate(candidate_rows)
                 ]
+                if any(
+                    set(step.source_ids) != {candidate.source_id}
+                    for step, candidate in zip(steps, candidate_rows, strict=True)
+                ):
+                    raise ValueError(
+                        "fixed retrieval step is outside the fixed retrieval candidates"
+                    )
                 action = m.AgentToolsDecision(steps=steps)
+                self.stage = "compose"
             else:
                 action = m.AgentComposeDecision()
+                self.stage = "finish"
+        elif self.stage == "compose":
+            action = m.AgentComposeDecision()
+            self.stage = "finish"
         else:
-            action = m.AgentSearchDecision(query=request.question)
+            action = (
+                m.AgentFinishDecision()
+                if context["has_answer"]
+                else m.AgentStopDecision(reason="Fixed baseline did not obtain an accepted answer")
+            )
         return m.ModuleResult(call_id=request.call_id, data=action, usage=m.Usage.local())
 
 
@@ -105,6 +134,24 @@ class AblationResult:
 
     report: EvaluationImport
     details: dict[str, Any]
+
+
+def ablation_identity(
+    tasks: Sequence[EvaluationTask], config: m.RunConfig
+) -> tuple[str, str, list[dict]]:
+    """返回 checkpoint 需要绑定的任务清单和共享运行配置摘要。"""
+    base = m.RunConfig.model_validate(config.model_dump(mode="json"))
+    manifest = [task.manifest() for task in tasks]
+    return (
+        sha256(canonical_json(manifest)).hexdigest(),
+        sha256(canonical_json(base)).hexdigest(),
+        manifest,
+    )
+
+
+def sample_key(sample: EvaluationSample) -> tuple[str, int, str]:
+    """返回一条样本的稳定身份，避免恢复时按列表位置误判。"""
+    return sample.mode, sample.repeat, sample.task_id
 
 
 async def run_ablation(
@@ -120,11 +167,15 @@ async def run_ablation(
     evaluator: str = "offline ablation runner",
     trace_factory: Callable[[], TraceSink] | None = None,
     unnecessary: Callable[[dict], bool | None] | None = None,
+    data_usage_provider: DataUsageProvider | None = None,
+    resume_samples: Sequence[EvaluationSample] = (),
+    on_sample: Callable[[EvaluationSample], None] | None = None,
 ) -> AblationResult:
     """顺序运行相同任务集的三组，冻结模型参数/预算，仅切换核验策略与规划器。
 
     宿主必须提供冻结数据的同一工厂；跨组返回快照 ID 不一致时拒绝汇总。任务、gold、
     数值容差和相关源仅用于结果评分，绝不进入 RunRequest 或 step_builder。
+    可选的用量读取器仅在每轮结束后、端口关闭前读取宿主已测量的目录和工具用量。
     """
     if type(repeats) is not int or repeats < 1 or not tasks:
         raise ValueError("tasks must be nonempty and repeats must be a positive integer")
@@ -148,28 +199,45 @@ async def run_ablation(
             "results": [{"mode": mode, "task_count": len(tasks) * repeats} for mode in MODES],
         }
     ).model_dump(mode="json")
-    manifest = [
-        task.__dict__
-        | {
-            "expected_answers": list(task.expected_answers)
-            if task.expected_answers is not None
-            else None,
-            "relevant_source_ids": sorted(task.relevant_source_ids)
-            if task.relevant_source_ids is not None
-            else None,
-        }
+    task_digest, config_digest, manifest = ablation_identity(tasks, base)
+    samples = list(resume_samples)
+    expected_keys = {
+        (mode, repeat, task.task_id)
+        for mode in MODES
+        for repeat in range(repeats)
         for task in tasks
-    ]
-    config_digest = sha256(canonical_json(base)).hexdigest()
-    task_digest = sha256(canonical_json(manifest)).hexdigest()
-    samples = []
-    snapshots = set()
+    }
+    completed_keys = {sample_key(sample) for sample in samples}
+    if len(completed_keys) != len(samples) or not completed_keys <= expected_keys:
+        raise ValueError("resume samples do not match the task set")
+    for sample in samples:
+        expected_mode = "no_verifier" if sample.mode == "fixed_retrieval" else sample.mode
+        if (
+            sample.result.task_id != sample.task_id
+            or sample.result.mode != expected_mode
+            or sample.result.versions.model_id != base.model_id
+            or sample.result.versions.model_params != base.model_params
+            or sample.result.versions.prompt_versions != base.prompt_versions
+            or (
+                base.dataset_snapshot is not None
+                and sample.result.versions.dataset_snapshot != base.dataset_snapshot
+            )
+        ):
+            raise ValueError("resume sample does not match its task or run configuration")
+    snapshots = {
+        sample.result.versions.dataset_snapshot
+        for sample in samples
+        if sample.result.versions.dataset_snapshot is not None
+    }
     configurations = {}
     for mode in MODES:
         policy = base.model_copy(update={"require_verification": mode == "full_agent"}, deep=True)
         configurations[mode] = policy.model_dump(mode="json")
         for repeat in range(repeats):
             for task in tasks:
+                key = (mode, repeat, task.task_id)
+                if key in completed_keys:
+                    continue
                 trace = CapturingTrace(trace_factory() if trace_factory else None)
                 async with ports_factory() as ports:
                     result = await run(
@@ -187,12 +255,14 @@ async def run_ablation(
                         else ports.planner,
                         trace=trace,
                     )
-                if result.versions.dataset_snapshot is not None:
-                    snapshots.add(result.versions.dataset_snapshot)
-                if len(snapshots) > 1:
-                    raise ValueError("dataset snapshot changed across ablation runs")
-                samples.append(
-                    score_sample(
+                    data_usage = (
+                        data_usage_provider(ports.data, result.run_id)
+                        if data_usage_provider is not None
+                        else None
+                    )
+                    if result.stop_reason == "catalog_snapshot_mismatch":
+                        raise ValueError("catalog snapshot mismatch")
+                    sample = score_sample(
                         task,
                         mode,
                         repeat,
@@ -200,12 +270,29 @@ async def run_ablation(
                         trace.events,
                         trace.artifacts,
                         unnecessary=unnecessary,
+                        data_usage=data_usage,
                     )
-                )
+                if result.versions.dataset_snapshot is not None:
+                    snapshots.add(result.versions.dataset_snapshot)
+                if len(snapshots) > 1:
+                    raise ValueError("dataset snapshot changed across ablation runs")
+                samples.append(sample)
+                completed_keys.add(key)
+                if on_sample is not None:
+                    on_sample(sample)
+    by_mode = {mode: [s for s in samples if s.mode == mode] for mode in MODES}
     rows, variability = [], {}
     for mode in MODES:
-        metrics, variability[mode] = aggregate([s for s in samples if s.mode == mode])
-        rows.append({"mode": mode, "task_count": len(tasks) * repeats, "metrics": metrics})
+        mode_samples = by_mode[mode]
+        metrics, variability[mode] = aggregate(mode_samples)
+        rows.append(
+            {
+                "mode": mode,
+                "task_count": len(tasks) * repeats,
+                "metrics": metrics,
+                "metric_coverage": metric_coverage(mode_samples),
+            }
+        )
     report = EvaluationImport.model_validate(
         {
             **metadata,
@@ -226,13 +313,20 @@ async def run_ablation(
             "manifest": manifest,
             "samples": [sample.export() for sample in samples],
             "variability": variability,
+            "metric_coverage": {mode: metric_coverage(by_mode[mode]) for mode in MODES},
+            "failure_categories": {mode: failure_category_summary(by_mode[mode]) for mode in MODES},
+            "failure_diagnostics": {
+                mode: failure_diagnostic_summary(by_mode[mode]) for mode in MODES
+            },
             "metric_definitions": {
                 "accuracy": "NFKC + casefold + whitespace normalized exact match",
+                "numerical_accuracy": "exact decimal with annotated absolute tolerance",
                 "retrieval": "unique registered source_ids from successful accepted tool attempts",
                 "grounding": "unique cited files in relevant annotations / unique cited files",
-                "valid_tool_call_rate": "valid ok ToolResults / audited tool-call intents",
+                "valid_tool_call_rate": "controller-accepted ok ToolResults / audited tool-call intents",
                 "unnecessary_tool_call_rate": "independent bool labels / audited tool-call intents",
                 "retry_recovery_rate": "retried operations with later ok result / retried operations",
+                "external_data_usage": "trusted measurements per catalog/tool attempt, including retries",
                 "unknown": "null if any required annotation or measured usage is missing",
             },
         },

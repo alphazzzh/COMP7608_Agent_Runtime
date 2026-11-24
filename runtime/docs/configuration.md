@@ -25,6 +25,8 @@
 
 `profile` 的身份字段必须填写；`description` 与 `suggested_questions` 可省略。`revision` 应随数据版本或适配器实现行为改变而更新。
 
+持续任务复用此 profile、`server.data_dir` 与总并发限制，不增加 TOML 工厂或密钥配置。页面/API 只设置受硬上限约束的累计轮数、模型/目录加工具调用和持续秒数，每轮权限与策略仍来自 `[run]`。Mission、Trigger、run、恢复尝试及重启对账的边界见[持续任务说明](persistent-missions.md)。
+
 ## Harness 自主决策配置
 
 真实 JsonPlanner 声明唯一支持的 `agent-loop-v1`，通过 `AgentPlannerPort.decide` 逐轮选择动作。数据处理模块与内容模块的异步方法不变；ComposeRequest 新增默认空的 revision，内容输出错误的 feedback 扩展仍仅在内容模块明确声明能力后使用，见下文。没有 agent-loop-v1 声明或 decide 方法的规划器以 invalid_planner_protocol 拒绝执行；旧两阶段规划 API、旧图与自动回退已删除。
@@ -35,7 +37,7 @@
 
 如果旧 `config.toml` 启动时出现 `Application configuration failed strict validation. Check: run.`，检查 `[run]` 是否还保留这两个退役字段；删除对应配置行，再使用原启动命令。`max_feedback_rounds` 属于旧核验反馈状态机，`fixed_extract_max_chars` 属于旧固定提取流程；当前自主循环不使用它们，不能通过重新添加模型字段来兼容。现在的错误信息会明确列出 `run.max_feedback_rounds` / `run.fixed_extract_max_chars` 并要求从 `[run]` 删除。其余有效预算和 `[llm]` 设置无需改变；这类错误与密钥及待接入模块没有关系。
 
-旧配置如果显式覆盖了 `[run.prompt_versions]`，也应将 `planner` 更新为 `"planner-v1.1-exploration"`，避免审计记录仍显示旧提示版本。省略该字段时使用当前模型默认值。
+旧配置如果显式覆盖了 `[run.prompt_versions]`，也应将 `planner` 更新为 `"planner-v1.2-continuation"`，避免审计记录仍显示旧提示版本。省略该字段时使用当前模型默认值。
 
 这些版本字符串是宿主声明的审计标签，不是对提供方实际提示内容的证明。内容反馈扩展不新增配置项，也不自动改写本地提示标签；实际能力与纠错行为同时由协议、调用请求/事件和源码恢复指纹记录。
 

@@ -404,11 +404,18 @@ async def test_parallel_limit_one_preserves_serial_dispatch():
 
 
 async def test_complete_plan_authorization_precedes_any_wave_dispatch():
-    data = SourceData()
-    result = await execute([step("valid"), step("foreign", "not-in-catalog")], data=data)
-    assert (result.status, result.stop_reason) == ("failed", "invalid_plan")
+    data, trace = SourceData(), MemoryTrace()
+    result = await execute(
+        [step("valid"), step("foreign", "not-in-catalog")], data=data, trace=trace
+    )
+    assert (result.status, result.stop_reason) == ("insufficient_evidence", "agent_stopped")
     assert data.invocations == []
     assert result.call_counts.steps == result.call_counts.tools == 0
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "source_authorization_mismatch"
+        for event in trace.events
+    )
 
 
 async def test_parallel_budget_reservations_never_overshoot_physical_data_cap():

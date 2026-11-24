@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from lake_agent import models as m
+from lake_agent.engine.agent_context import catalog_page
 from lake_agent.runtime import run
 from lake_agent.validation import canonical_json
 from tests.support.agent import (
@@ -49,6 +51,42 @@ async def test_model_searches_once_then_tools_compose_verify_and_finish():
     assert result.call_counts.tools == 1 and len(content.verifications) == 1
     assert planner.requests[2].context["tool_observations"]
     assert result.answer.citations == [content.compositions[0].evidence[0].evidence_id]
+    assert result.source_funnel == m.SourceFunnel(
+        searched_sources=["demo-annual", "demo-quarter"],
+        visited_sources=["demo-annual"],
+        evidence_sources=["demo-annual"],
+        cited_sources=["demo-annual"],
+    )
+
+
+def test_catalog_page_advances_past_oversized_identifier_and_previews_format():
+    """超长 ID 保持显式省略并前进游标，超长 format 只截预览。"""
+    oversized_id = 'a文\\"' * 100
+    controller = SimpleNamespace(
+        sources={
+            oversized_id: m.SourceRecord(
+                source_id=oversized_id,
+                name="Oversized",
+                format="csv",
+                summary="large source",
+            ),
+            "normal": m.SourceRecord(
+                source_id="normal", name="Normal", format='表\\"' * 400, summary="usable"
+            ),
+        },
+        cfg=SimpleNamespace(planner_preview_bytes=256, max_planner_context_bytes=1024),
+    )
+
+    first = catalog_page(controller, 0, 2, max_bytes=100)
+    second = catalog_page(controller, first["next_offset"], 2, max_bytes=256)
+
+    assert len(canonical_json(first)) <= 100
+    assert first["sources"] == [] and first["omitted_sources"] == 1
+    assert first["next_offset"] == 1
+    assert len(canonical_json(second)) <= 256
+    assert second["sources"][0]["source_id"] == "normal"
+    assert second["sources"][0]["format"]["truncated"] is True
+    assert second["next_offset"] is None
 
 
 async def test_registered_catalog_source_can_be_read_without_search():
@@ -117,9 +155,292 @@ async def test_verification_failure_cannot_be_reported_as_success_for_the_same_a
 
 
 async def test_unknown_catalog_source_is_not_authorized_by_a_model_action():
-    result, _, _, _ = await execute([tool_action("unknown")])
-    assert result.status == "failed" and result.stop_reason == "invalid_plan"
-    assert result.call_counts.tools == 0
+    result, planner, _, _ = await execute(
+        [tool_action("unknown"), tool_action(), {"kind": "compose"}, {"kind": "finish"}]
+    )
+    assert result.status == "completed"
+    assert result.call_counts.tools == 1
+    assert planner.requests[1].context["last_action"]["code"] == "source_authorization_mismatch"
+
+
+async def test_invalid_tool_schema_is_rejected_with_feedback_and_can_be_corrected():
+    invalid = tool_action()
+    invalid["steps"][0]["args"]["unexpected"] = "ignored only if validation is broken"
+    result, planner, _, trace = await execute(
+        [invalid, tool_action(), {"kind": "compose"}, {"kind": "finish"}]
+    )
+
+    assert result.status == "completed" and result.call_counts.tools == 1
+    assert planner.requests[1].context["last_action"]["code"] == "tool_schema_mismatch"
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "tool_schema_mismatch"
+        for event in trace.events
+    )
+
+
+async def test_rejected_tool_plan_preserves_prior_evidence_for_the_corrective_turn():
+    invalid = tool_action(source="demo-quarter", step="bad-source")
+    invalid["steps"][0]["source_ids"] = ["demo-annual"]
+    result, planner, content, _ = await execute(
+        [tool_action(), invalid, {"kind": "compose"}, {"kind": "finish"}]
+    )
+
+    assert result.status == "completed" and result.call_counts.tools == 1
+    context = planner.requests[2].context
+    assert context["last_action"]["code"] == "source_authorization_mismatch"
+    assert context["evidence_summary"]
+    assert len(content.compositions[0].evidence) == 1
+
+
+async def test_evidence_capacity_stops_before_partial_commit():
+    result, _, _, trace = await execute([tool_action()], max_evidence_bytes=100)
+
+    assert (result.status, result.stop_reason) == ("budget_exceeded", "evidence_budget")
+    assert not any(event.event_type == "evidence.added" for event in trace.events)
+
+
+async def test_external_data_bytes_and_cost_are_measured_for_tool_results():
+    class MeteredData(DemoData):
+        async def catalog(self, request):
+            reply = await super().catalog(request)
+            return reply.model_copy(update={"external_bytes_read": 11, "external_cost_usd": 0.02})
+
+        async def invoke(self, request):
+            reply = await super().invoke(request)
+            return reply.model_copy(update={"external_bytes_read": 7, "external_cost_usd": 0.03})
+
+    result, _, _, _ = await execute(
+        [tool_action(), {"kind": "compose"}, {"kind": "finish"}], data=MeteredData()
+    )
+
+    assert result.status == "completed"
+    assert result.external_data_bytes_total == 18
+    assert result.external_data_cost_usd == pytest.approx(0.05)
+
+
+async def test_external_data_budget_stops_after_indivisible_tool_call_overrun():
+    class MeteredData(DemoData):
+        def __init__(self):
+            super().__init__()
+            self.invocations = 0
+
+        async def catalog(self, request):
+            reply = await super().catalog(request)
+            return reply.model_copy(update={"external_bytes_read": 10, "external_cost_usd": 0})
+
+        async def invoke(self, request):
+            self.invocations += 1
+            reply = await super().invoke(request)
+            return reply.model_copy(update={"external_bytes_read": 4, "external_cost_usd": 0})
+
+    data = MeteredData()
+    result, _, _, _ = await execute(
+        [tool_action(), tool_action(step="read-2"), {"kind": "compose"}],
+        data=data,
+        max_external_data_bytes=12,
+    )
+
+    assert (result.status, result.stop_reason) == ("budget_exceeded", "external_data_budget")
+    assert data.invocations == 1
+    assert result.external_data_bytes_total == 14
+
+
+async def test_unknown_external_measurement_fails_closed_when_byte_budget_is_enabled():
+    result, _, _, _ = await execute([{"kind": "compose"}], max_external_data_bytes=100)
+
+    assert (result.status, result.stop_reason) == ("failed", "external_data_usage_unavailable")
+
+
+async def test_evidence_budget_rejects_whole_multi_evidence_tool_response():
+    class TwoEvidenceData(DemoData):
+        async def invoke(self, request):
+            return m.ToolResult(
+                call_id=request.call_id,
+                data={
+                    "evidence": [
+                        {
+                            "source_id": request.args["source_id"],
+                            "content_type": "text",
+                            "payload": "x" * 350,
+                            "locator": {"row": index},
+                        }
+                        for index in range(2)
+                    ]
+                },
+            )
+
+    result, _, _, trace = await execute(
+        [tool_action()], data=TwoEvidenceData(), max_evidence_bytes=1000
+    )
+
+    assert (result.status, result.stop_reason) == ("budget_exceeded", "evidence_budget")
+    assert not any(event.event_type == "evidence.added" for event in trace.events)
+
+
+async def test_invalid_planner_output_can_be_repaired_within_existing_turn_budget():
+    class InvalidOutputOnce(ActionPlanner):
+        def __init__(self):
+            super().__init__([{"kind": "compose"}, {"kind": "finish"}])
+
+        async def decide(self, request):
+            self.requests.append(request.model_copy(deep=True))
+            if len(self.requests) == 1:
+                return m.ModuleResult(
+                    call_id=request.call_id,
+                    status="error",
+                    error=m.ErrorInfo(
+                        code="invalid_model_output", message="The decision was not valid JSON."
+                    ),
+                    usage=m.Usage.local(),
+                )
+            action = next(self.actions)
+            return m.ModuleResult(call_id=request.call_id, data=action, usage=m.Usage.local())
+
+    planner, trace, content = InvalidOutputOnce(), MemoryTrace(), FlexibleContent()
+    result = await run(
+        m.RunRequest(
+            task_id="planner-repair",
+            question="目前有哪些资料？",
+            config=m.RunConfig(max_agent_turns=3),
+        ),
+        data=DemoData(),
+        content=content,
+        planner=planner,
+        trace=trace,
+    )
+    assert result.status == "completed"
+    assert result.call_counts.planner == 3
+    assert planner.requests[1].context["last_action"]["error"]["code"] == "invalid_model_output"
+
+
+async def test_compose_and_verify_use_only_controller_approved_evidence_subset():
+    def selected_action(kind):
+        def choose(request):
+            evidence_id = request.context["evidence_summary"][0]["evidence_id"]
+            return {"kind": kind, "evidence_ids": [evidence_id]}
+
+        return choose
+
+    content = FlexibleContent()
+    result, planner, _, _ = await execute(
+        [tool_action(), selected_action("compose"), selected_action("verify"), {"kind": "finish"}],
+        content=content,
+    )
+
+    assert result.status == "completed"
+    evidence_id = planner.requests[1].context["evidence_summary"][0]["evidence_id"]
+    assert [item.evidence_id for item in content.compositions[0].evidence] == [evidence_id]
+    assert [item.evidence_id for item in content.verifications[0].evidence] == [evidence_id]
+
+
+async def test_required_verification_rejects_subset_before_content_call():
+    content = FlexibleContent()
+
+    def verify_first(request):
+        return {
+            "kind": "verify",
+            "evidence_ids": [request.context["evidence_summary"][0]["evidence_id"]],
+        }
+
+    result, planner, _, trace = await execute(
+        [
+            tool_action("demo-annual", "read-annual"),
+            tool_action("demo-quarter", "read-quarter"),
+            {"kind": "compose"},
+            verify_first,
+            {"kind": "finish"},
+            {"kind": "verify"},
+            {"kind": "finish"},
+        ],
+        content=content,
+        require_verification=True,
+    )
+
+    assert result.status == "completed"
+    assert [len(request.evidence) for request in content.verifications] == [2]
+    assert planner.requests[4].context["last_action"]["code"] == "incomplete_verification_evidence"
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "incomplete_verification_evidence"
+        for event in trace.events
+    )
+
+
+async def test_required_verification_with_explicit_full_evidence_ids_is_current():
+    content = FlexibleContent()
+
+    def verify_all_explicitly(request):
+        return {
+            "kind": "verify",
+            "evidence_ids": [item["evidence_id"] for item in request.context["evidence_summary"]],
+        }
+
+    result, _, _, _ = await execute(
+        [
+            tool_action("demo-annual", "read-annual"),
+            {"kind": "compose"},
+            verify_all_explicitly,
+            {"kind": "finish"},
+        ],
+        content=content,
+        require_verification=True,
+    )
+
+    assert result.status == "completed"
+    assert len(content.verifications) == 1
+
+
+async def test_invalid_evidence_subset_is_rejected_before_content_dispatch():
+    content = FlexibleContent()
+    result, planner, _, trace = await execute(
+        [
+            tool_action(),
+            {"kind": "compose", "evidence_ids": ["foreign-evidence"]},
+            {"kind": "compose"},
+            {"kind": "finish"},
+        ],
+        content=content,
+    )
+
+    assert result.status == "completed"
+    assert len(content.compositions) == 1
+    assert planner.requests[2].context["last_action"]["code"] == "invalid_evidence_selection"
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "invalid_evidence_selection"
+        for event in trace.events
+    )
+
+
+async def test_planner_output_repair_stops_after_two_invalid_outputs():
+    class AlwaysInvalid(ActionPlanner):
+        async def decide(self, request):
+            self.requests.append(request.model_copy(deep=True))
+            return m.ModuleResult(
+                call_id=request.call_id,
+                status="error",
+                error=m.ErrorInfo(code="invalid_model_output", message="Invalid JSON."),
+                usage=m.Usage.local(),
+            )
+
+    planner = AlwaysInvalid([])
+    trace = MemoryTrace()
+    result = await run(
+        m.RunRequest(
+            task_id="planner-bounded-repair",
+            question="目前有哪些资料？",
+            config=m.RunConfig(max_agent_turns=8),
+        ),
+        data=DemoData(),
+        content=FlexibleContent(),
+        planner=planner,
+        trace=trace,
+    )
+
+    assert (result.status, result.stop_reason) == ("failed", "invalid_model_output")
+    assert len(planner.requests) == 3
+    assert result.call_counts.planner == 3
 
 
 async def test_local_search_only_loop_stops_at_agent_turn_budget_beyond_graph_default():
@@ -551,3 +872,79 @@ async def test_successful_data_retry_does_not_leave_a_stale_terminal_failure():
     assert result.stop_reason == "agent_stopped"
     assert result.call_counts.retries == 1
     assert result.failure is None
+
+
+async def test_planner_catalog_limits_cap_inline_sources_and_bytes():
+    result, planner, _, _ = await execute(
+        [{"kind": "compose"}, {"kind": "finish"}],
+        planner_catalog_max_sources=1,
+    )
+    assert result.status == "completed"
+    catalog = planner.requests[0].context["catalog"]
+    assert catalog["total"] == 2
+    assert len(catalog["sources"]) == 1
+    assert catalog["omitted"] == 1
+
+    zero_result, zero_planner, _, _ = await execute(
+        [{"kind": "compose"}, {"kind": "finish"}],
+        planner_catalog_max_sources=0,
+    )
+    assert zero_result.status == "completed"
+    zero_catalog = zero_planner.requests[0].context["catalog"]
+    assert zero_catalog == {"total": 2, "sources": [], "omitted": 2}
+
+    byte_result, byte_planner, _, _ = await execute(
+        [{"kind": "compose"}, {"kind": "finish"}],
+        planner_catalog_preview_bytes=0,
+    )
+    assert byte_result.status == "completed"
+    assert byte_planner.requests[0].context["catalog"] == {"total": 2, "sources": [], "omitted": 2}
+
+
+async def test_duplicate_search_is_rejected_when_enabled():
+    result, planner, content, trace = await execute(
+        [
+            {"kind": "search", "query": "annual revenue"},
+            {"kind": "search", "query": "  Annual   REVENUE "},
+            {"kind": "compose"},
+            {"kind": "finish"},
+        ],
+        deduplicate_searches=True,
+    )
+    assert result.status == "completed"
+    assert len(content.searches) == 1
+    assert planner.requests[1].context["last_action"]["query"] == "annual revenue"
+    assert planner.requests[1].context["search_history"] == [
+        {"query": "annual revenue", "count": 2}
+    ]
+    assert planner.requests[2].context["last_action"]["status"] == "rejected"
+    assert planner.requests[2].context["last_action"]["code"] == "duplicate_search"
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "duplicate_search"
+        for event in trace.events
+    )
+
+
+async def test_consecutive_search_limit_rejects_loop_and_resets_after_tools():
+    result, planner, content, trace = await execute(
+        [
+            {"kind": "search", "query": "q1"},
+            {"kind": "search", "query": "q2"},
+            {"kind": "search", "query": "q3"},
+            tool_action(),
+            {"kind": "search", "query": "q4"},
+            {"kind": "compose"},
+            {"kind": "finish"},
+        ],
+        max_consecutive_searches=2,
+    )
+    assert result.status == "completed"
+    assert [req.subtask.search_query for req in content.searches] == ["q1", "q2", "q4"]
+    assert planner.requests[3].context["last_action"]["status"] == "rejected"
+    assert planner.requests[3].context["last_action"]["code"] == "search_loop_limit"
+    assert any(
+        event.event_type == "agent.action.rejected"
+        and event.detail.get("code") == "search_loop_limit"
+        for event in trace.events
+    )

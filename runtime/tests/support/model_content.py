@@ -302,6 +302,8 @@ class ModelContent(DemoContent):
                 "stream": False,
                 "n": 1,
             }
+            if request.token_budget.max_output_tokens_this_call is not None:
+                body["max_tokens"] = request.token_budget.max_output_tokens_this_call
             encoded = json.dumps(
                 body, ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).encode("utf-8")

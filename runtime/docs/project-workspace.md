@@ -1,6 +1,6 @@
 # 项目数据池工作台
 
-正式工作台提供智能问答、数据来源和任务历史，执行仍委托原异步 Harness。生产入口从服务端 TOML 注册真实模块，不包含演示配置或固定回答。
+正式工作台提供智能问答、数据来源、任务历史和持续任务，执行仍委托原异步 Harness。生产入口从服务端 TOML 注册真实模块，不包含演示配置或固定回答。
 
 ## 配置与使用
 
@@ -9,11 +9,12 @@
 1. **智能问答**：选择已注册配置、输入实际问题，以 full_agent 提交后查看答案、证据与原始调用。正式入口只开放 full_agent；固定检索不是应用执行模式。
 2. **数据来源**：展示服务端公开注册的 SourceRecord；配置式工厂默认不预读目录，因此此列表可以为空。实际运行仍通过 DataPort.catalog 发现目录，证据中的 locator 指向本次读取片段。
 3. **任务历史**：查看实际运行记录。取消或停机后的未终结任务可手动尝试恢复，是否安全继续由内核决定。恢复不刷新期限、预算，也不重复派发已知成功结果。
-4. **实验评估（仅显式测试宿主）**：下载模板，填入实际评估结果后导入。未知质量、token 或成本指标保持 null，页面不从一次运行推算实验分数。
+4. **持续任务**：选择已就绪配置，设置手动/固定延迟周期、累计轮数/模型/数据调用和持续秒数。创建后默认立即运行，并在首个内核 completed 后结束；可关闭该结束选项以继续后续周期。查看预留与实际用量、交接和最近 run；详细边界与示例见[持续任务说明](persistent-missions.md)。
+5. **实验评估（仅显式测试宿主）**：下载模板，填入实际评估结果后导入。未知质量、token 或成本指标保持 null，页面不从一次运行推算实验分数。
 
 每次提交问题产生独立运行。“执行过程与原始记录”可按提问切换任务，时间线只显示当前任务，恢复尝试留在同一任务下。连续执行阶段保持审计顺序并可折叠；支持阶段筛选和事件、工具、编号搜索。切换问题会清除旧筛选。新 Web 请求的 task_id 使用 web:{run_id}，旧任务恢复继续使用已保存身份。
 
-配置中的 server.data_dir 相对于配置文件解析。相同目录保留同一组历史，更换目录会展示另一组记录。重启时未结束的 queued/running 记录会标为 interrupted，不自动重新派发。Ctrl+C 关闭服务时会等待其任务与磁盘操作结束。
+配置中的 server.data_dir 相对于配置文件解析。相同目录保留同一组历史，更换目录会展示另一组记录。普通单次运行重启时未结束的 queued/running 记录会标为 interrupted，不自动重新派发；Mission 所属周期由持续任务调度器按已保存 Trigger/run 身份和核心状态自动对账，未知结果保留预留并阻塞，不通过新身份重做。Ctrl+C 关闭服务时会等待其任务与磁盘操作结束。
 
 报告是下载时刻的独立 HTML 快照，不会随运行更新。实际模块、模型和数据必须接通后才能做问题理解、证据不足和答案质量验收。
 
@@ -21,9 +22,11 @@
 
 删除通过持久标记协调SQLite与文件清理；发生中断时，重试删除或下次服务启动会继续清理，未清理完成不会返回204。
 
+上述恢复与删除按钮用于普通运行。Mission 所属 run 可查看、导出和取消，普通 resume/delete 会返回 `mission_owned`，父任务结束后也保留对账和审计记录。持续任务的暂停/结束不会强杀已领取周期；取消当前 run 会先暂停 active 父任务，再走原取消清理协议。当前没有 Mission 删除 API。
+
 ## 编程注册
 
-CLI 使用 load_config() 与 configured_profile() 构造一个 ExecutionProfile。宿主也可通过 create_app(profiles=[...]) 显式注入多份配置；没有注入时注册表为空，不能提交任务。可信测试宿主可用 allowed_modes 显式开放对照模式，用 enable_evaluations=True 开放实验评估；正常CLI不开放这些能力。
+CLI 使用 load_config() 与 configured_profile() 构造一个 ExecutionProfile。宿主也可通过 create_app(profiles=[...]) 显式注入多份配置；没有注入时注册表为空，不能提交任务。可信测试宿主可用 allowed_modes 显式开放对照模式，用 enable_evaluations=True 开放实验评估；正常CLI不开放这些实验能力。持续任务仅运行 full_agent；宿主禁用它时，`features.missions=false`，不启动后台调度，创建/resume/wake 被拒绝，历史仍可读取、暂停或结束。
 
 ExecutionProfile 的 ports_factory 每次 run/resume 返回独立 ExecutionPorts，并在退出时清理资源。metadata、sources 和 run_config 是公开身份及策略；factory、私有 options 和密钥留在宿主。绑定摘要参与恢复签名而不公开连接参数。实际适配器行为或数据版本变化时更新 metadata.revision。
 
@@ -56,7 +59,7 @@ sources 只承担公开目录展示，可以为空，不代替 DataPort.catalog�
 
 ## HTTP接口
 
-下表路径相对于本机服务地址。评估接口仅在测试宿主显式启用时可用，正式入口返回404。除HTML报告、静态页面和DELETE的204空响应外，成功响应为JSON。API不接受Python代码、factory路径、任意本地文件路径、密钥或客户端自行设置的运行预算；模块及预算由服务端注册。
+下表路径相对于本机服务地址。评估接口仅在测试宿主显式启用时可用，正式入口返回404。除HTML报告、静态页面和DELETE的204空响应外，成功响应为JSON。API不接受Python代码、factory路径、任意本地文件路径、密钥或客户端自行设置的完整运行预算；持续任务只接受固定字段、受硬上限约束的累计限制，单轮权限与策略仍由服务端 profile 管理。
 
 | 方法与路径 | 输入及成功响应 |
 |---|---|
@@ -72,6 +75,10 @@ sources 只承担公开目录展示，可以为空，不代替 DataPort.catalog�
 | `GET /api/runs/{run_id}/artifacts/{attempt_id}/{ref}` | 返回该run指定执行段中已被审计事件引用的artifact JSON；未知身份或未引用内容返回404 |
 | `GET /api/runs/{run_id}/export` | 下载完整运行详情JSON，附件名为`<run_id>.json` |
 | `GET /api/runs/{run_id}/report` | 下载独立HTML快照，附件名为`<run_id>.html`；内容转义，报告无远程资源或脚本 |
+| `GET /api/missions` / `GET /api/missions/{mission_id}` | 持续任务列表含 scheduler 状态；详情含累计/预留、UTC epoch 秒时间、交接及最近 triggers |
+| `POST /api/missions` | 32 KiB 以内严格 JSON；201 返回已保存任务，累计限制默认 10 轮/120 模型/120 目录加工具调用/86400 秒 |
+| `POST /api/missions/{mission_id}/pause` / `resume` / `complete` | 无需请求体，200 返回任务；暂停与结束不强杀已领取周期，blocked 不能普通恢复 |
+| `POST /api/missions/{mission_id}/wake` | `{event_id:string}`，32 KiB 以内；202 返回固定 trigger/run 身份，同事件重试幂等 |
 | `GET /api/evaluations` | 返回`{evaluations:[完整评估报告]}`，按导入时间从新到旧，最多100条 |
 | `POST /api/evaluations` | 请求体为上节评估导入结构；201返回完整报告，增加服务端生成的`evaluation_id,imported_at,origin`，其中origin固定为`imported` |
 | `GET /api/evaluations/template` | 下载合法导入模板`evaluation-template.json`，指标为null；不会保存为评估结果 |
@@ -85,7 +92,7 @@ sources 只承担公开目录展示，可以为空，不代替 DataPort.catalog�
 {"question":"比较两类来源对同一指标的定义，并给出依据。","profile_id":"project-main","mode":"full_agent"}
 ```
 
-`question`必填，原始字符串长度为1–2000字符，去除首尾空白后必须非空。正式入口的`mode`只允许`full_agent`，省略时为`full_agent`；测试宿主可显式开启`no_verifier`，禁用模式返回422 mode_disabled，恢复旧的禁用模式同样拒绝。`profile_id`长度为1–100字符，必须对应服务端注册且已就绪的配置。省略 profile_id 时，仅有一个配置才能自动选择；多个配置返回 profile_required，空注册表返回 profiles_unconfigured。历史 scenario 字段不再接受。
+`question`必填，原始字符串长度为1–2000字符，去除首尾空白后必须非空。正式入口的`mode`只允许`full_agent`，省略时为`full_agent`；测试宿主可显式开启`no_verifier`，禁用模式返回422 mode_disabled，恢复旧的禁用模式同样拒绝。`profile_id`长度为1–100字符，必须对应服务端注册且已就绪的配置。省略 profile_id 时，仅有一个配置才能自动选择；多个配置返回 profile_required，空注册表返回 profiles_unconfigured。历史 scenario 字段不再接受。持续任务不接受 mode 或任意 RunRequest；创建字段、各项硬上限、状态与 UTC epoch 秒规范见[持续任务 API](persistent-missions.md#http-api-与可复制示例)。
 
 运行摘要包含`run_id,profile_id,profile,question,mode,status,created_at,updated_at,error,result`；`profile`为创建任务时保存的公开快照。详情中的事件保留原TraceEvent字段并增加`attempt_id`，按执行段和段内seq展示；证据按evidence_id去重。`metrics`包含`tools,steps,model_calls,evidence,attempts,duration_ms`，已有终态时以RunResult累计计数为准，不能把多个执行段的重放事件重复相加。
 
@@ -101,8 +108,11 @@ Web状态包括`queued/running/interrupted/blocked`，以及内核返回的`comp
 | 403 | `origin_forbidden`：写入请求来自其他Origin，或被浏览器标为cross-site |
 | 404 | `profile_not_found`或`not_found`：配置、运行、执行段、引用artifact或评估不存在 |
 | 409 | `profiles_unconfigured/profile_unavailable/profile_changed`、`already_running/not_resumable/not_running`：配置或任务状态不允许本次操作 |
+| 409 | `mission_owned`：不能独立恢复/删除所属运行；`mission_closed/blocked_resume_forbidden`：持续任务状态不允许该操作 |
 | 413 | `request_too_large`：评估请求体超过128KiB；`evaluation_too_large`：序列化后的保存记录超过上限 |
+| 413 / 422 | `request_too_large` / `invalid_mission`：持续任务创建或 wake 超过32KiB，或不满足严格字段与限额校验 |
 | 429 | `capacity_reached`：已达服务并发上限（默认2）；`attempt_limit`：已达20次执行尝试 |
+| 429 / 503 | `mission_queue_full`：待办或累计事件身份容量已满；`mission_scheduler_failed`：持久调度故障，已停止派发 |
 | 503 | `service_stopping/history_unavailable/evaluations_unavailable`：服务关闭中，或本地记录无法安全读取/保存 |
 
 写入请求若带`Origin`，必须匹配当前协议、主机和端口；没有Origin的本地脚本请求仍可使用，`Sec-Fetch-Site: cross-site`会被拒绝。服务不开放CORS，页面使用同源内容安全策略和文本渲染；这些措施不提供登录或多人权限。路径参数只定位服务生成的记录及已引用artifact，不能用于读取任意文件。
@@ -113,4 +123,4 @@ Web状态包括`queued/running/interrupted/blocked`，以及内核返回的`comp
 
 `127.0.0.1`地址只能在本机使用。向组员展示可共享屏幕或发送下载的HTML报告；他人要运行应用，可在自己的项目副本启动。此版本没有公网部署、登录或多人权限系统。
 
-评估报告的 external_data_bytes_total / external_data_cost_usd 可以记录独立测得的外部数据流量和费用；当前 DataPort 不提供可信计量字段，运行器保持 null。data_calls_mean 只表示调用次数，不能替代字节量或费用。
+评估报告的 `external_data_bytes_total` / `external_data_cost_usd` 可以由可信评估宿主按尝试提供实测流量和费用。默认没有计量，仍为 null；`data_calls_mean` 只表示调用次数。接线方法见[消融评估说明](ablation-evaluation.md#指标定义与缺测)。

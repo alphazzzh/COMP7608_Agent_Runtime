@@ -9,12 +9,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from ..models import Model
 
 _UNIT = Annotated[float, Field(ge=0, le=1)]
-_NONNEGATIVE = Annotated[float, Field(ge=0)]
+_NONNEGATIVE = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+_COUNT = Annotated[int, Field(strict=True, ge=0)]
 _LABEL = Annotated[str, Field(min_length=1, max_length=200)]
 _TIMESTAMP = Annotated[str, Field(max_length=64)]
 # 报告可以比较评估侧固定策略；该标签绝不能扩展生产 RunRequest 的执行模式。
@@ -57,14 +58,22 @@ class EvaluationMetrics(_EvaluationModel):
     tool_calls_mean: _NONNEGATIVE | None = None
     # 访问次数与实际数据传输量、外部数据服务费用是不同测量；没有可靠上报时保留空值。
     data_calls_mean: _NONNEGATIVE | None = None
-    external_data_bytes_total: _NONNEGATIVE | None = None
+    external_data_bytes_total: _COUNT | None = None
     external_data_cost_usd: _NONNEGATIVE | None = None
     latency_ms_mean: _NONNEGATIVE | None = None
-    token_total: _NONNEGATIVE | None = None
-    provider_requests_total: _NONNEGATIVE | None = None
-    input_tokens_total: _NONNEGATIVE | None = None
-    output_tokens_total: _NONNEGATIVE | None = None
+    token_total: _COUNT | None = None
+    provider_requests_total: _COUNT | None = None
+    input_tokens_total: _COUNT | None = None
+    output_tokens_total: _COUNT | None = None
     cost_usd: _NONNEGATIVE | None = None
+
+
+class MetricCoverage(_EvaluationModel):
+    """区分有效标注、明确不适用与缺少标注的任务数。"""
+
+    applicable_count: _COUNT
+    not_applicable_count: _COUNT
+    unknown_count: _COUNT
 
 
 class EvaluationRow(_EvaluationModel):
@@ -73,6 +82,32 @@ class EvaluationRow(_EvaluationModel):
     mode: EvaluationMode
     task_count: Annotated[int, Field(ge=1, le=1_000_000)]
     metrics: EvaluationMetrics = Field(default_factory=EvaluationMetrics)
+    metric_coverage: dict[str, MetricCoverage] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def omit_empty_coverage(self, handler):
+        result = handler(self)
+        if not self.metric_coverage:
+            result.pop("metric_coverage", None)
+        return result
+
+    @field_validator("metric_coverage")
+    @classmethod
+    def _known_metric_coverage(cls, value):
+        allowed = set(EvaluationMetrics.model_fields)
+        if not set(value) <= allowed:
+            raise ValueError("metric coverage contains an unknown metric")
+        return value
+
+    @model_validator(mode="after")
+    def _coverage_matches_task_count(self) -> Self:
+        for name, coverage in self.metric_coverage.items():
+            total = (
+                coverage.applicable_count + coverage.not_applicable_count + coverage.unknown_count
+            )
+            if total != self.task_count:
+                raise ValueError(f"metric coverage counts for {name} must sum to task_count")
+        return self
 
 
 class EvaluationImport(_EvaluationModel):

@@ -1,9 +1,13 @@
-# 仓库只同步 runtime；根目录仅保留入口说明和忽略规则。
+# 仓库同步 runtime、入口说明及精选实验结果与架构图；
 # 采用允许清单，防止 proposal、课程资料或其他本地目录被意外提交。
 /*
 !/.gitignore
 !/README.md
 !/runtime/
+!/docs/
+/docs/*
+!/docs/LakeQA-实验结果.md
+!/docs/figures/
 
 # 本地环境、生成的运行状态与构建输出。
 .venv/

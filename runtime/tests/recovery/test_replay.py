@@ -29,9 +29,19 @@ from tests.support.recovery import (
 @pytest.mark.parametrize("event_type", ["tool.observed", "evidence.added"])
 async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, event_type):
     """控制器内存丢失后，不能重复已经成功的外部工具调用。"""
+
+    class MeteredData(RecordingData):
+        async def catalog(self, request):
+            reply = await super().catalog(request)
+            return reply.model_copy(update={"external_bytes_read": 11, "external_cost_usd": 0.02})
+
+        async def invoke(self, request):
+            reply = await super().invoke(request)
+            return reply.model_copy(update={"external_bytes_read": 7, "external_cost_usd": 0.03})
+
     resume, Store, _ = recovery_api()
     state_path, trace_root = tmp_path / "state.db", tmp_path / "traces"
-    old_data, old_content, old_planner = RecordingData(), RecordingContent(), RecordingPlanner()
+    old_data, old_content, old_planner = MeteredData(), RecordingContent(), RecordingPlanner()
     interrupted = InterruptingTrace(trace_root, event_type=event_type)
     store = Store(state_path)
     try:
@@ -54,7 +64,7 @@ async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, ev
     assert len(old_data.catalog_requests) == len(old_data.tool_requests) == 1
     assert len(old_planner.requests) == 2
 
-    data, content, planner = RecordingData(), RecordingContent(), RecordingPlanner()
+    data, content, planner = MeteredData(), RecordingContent(), RecordingPlanner()
     restarted = Store(state_path)
     try:
         result = await resume(
@@ -85,6 +95,8 @@ async def test_resume_reconstructs_known_replies_without_redispatch(tmp_path, ev
     assert (result.call_counts.planner, result.call_counts.model_calls) == (5, 5)
     assert result.call_counts.content == 5  # prepare/search/compose/verify，加上一次重新绑定。
     assert (result.usage.input_tokens, result.usage.output_tokens) == (35, 15)
+    assert result.external_data_bytes_total == 18
+    assert result.external_data_cost_usd == pytest.approx(0.05)
     evidence = content.compositions[0].evidence
     assert len(evidence) == 1
     assert evidence[0].call_id == old_data.tool_requests[0].call_id

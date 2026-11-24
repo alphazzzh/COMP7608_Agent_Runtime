@@ -25,6 +25,7 @@ runtime/
     engine/                        # 正式模型自主循环与执行机制
     adapters/                      # 正式模型适配器
     evaluation/                    # 独立评估报告格式，不运行基线
+    missions/                      # 持续任务、触发器、累计额度和跨轮交接
     web/                           # 工作台、任务管理和报告存储
   tests/
     README.md                      # 分组导航、共享支持代码和离线命令
@@ -34,6 +35,7 @@ runtime/
     adapters/                      # 模型适配、配置读取与工厂接线
     engine/                        # 动作循环、执行和上下文
     recovery/                      # SQLite、审计尝试与恢复
+    missions/                      # 持续任务调度、对账、HTTP 和页面行为
     web/                           # 工作台策略、生命周期和展示
     evaluation/                    # 消融运行、指标与报告边界
     support/                       # 合成端口、固定策略和评估统计
@@ -95,10 +97,14 @@ from lake_agent.adapters.planner import JsonPlanner
 
 恢复实现指纹覆盖顶层公共 Python 模块和 `engine/`、`adapters/` 的递归 Python 文件，使用包内相对路径区分文件。目录移动也会改变指纹，旧版本未终结任务不能直接继续；既有 `runs/` 记录保持原样，不执行跨版本迁移。
 
-## 评估报告与工作台
+## 持续任务、评估报告与工作台
 
 | 文件 | 职责 |
 |---|---|
+| [missions/models.py](../src/lake_agent/missions/models.py) | 持续任务、触发器、额度和公开视图的严格契约 |
+| [missions/store.py](../src/lake_agent/missions/store.py) | SQLite 调度、领取与一次性结算；未知结果保留预留 |
+| [missions/service.py](../src/lake_agent/missions/service.py) | 把持久触发器交给 RunService，对账核心终态并处理暂停与取消 |
+| [missions/handoff.py](../src/lake_agent/missions/handoff.py) | 从已知终态构造下一轮规划线索，不继承证据权限 |
 | [evaluation/__init__.py](../src/lake_agent/evaluation/__init__.py) | 报告契约包说明，不导入实验运行器 |
 | [evaluation/models.py](../src/lake_agent/evaluation/models.py) | EvaluationMode、指标、行与导入报告模型；允许记录三组消融结果 |
 | [web/__init__.py](../src/lake_agent/web/__init__.py) | 可选工作台的入口说明 |
@@ -128,6 +134,7 @@ from lake_agent.adapters.planner import JsonPlanner
 | `tests/adapters/` | 配置加载、工厂接线，真实规划与隔离内容适配器的请求、输出、兼容和客户端边界 |
 | `tests/engine/` | 自主动作、工具调度、上下文、核验适用状态和答案修订 |
 | `tests/recovery/` | SQLite 状态、租约、调用重放、预算、取消与恢复兼容性 |
+| `tests/missions/` | 持续任务存储、调度对账、跨轮交接、HTTP 和前端交互 |
 | `tests/web/` | HTTP/页面策略、生命周期、失败信息、报告和任务管理 |
 | `tests/evaluation/` | 三组消融执行、CLI、统计与报告契约 |
 | [tests/isolated_runtime.py](../tests/isolated_runtime.py) | 源码侧运行时隔离 CLI；显式运行时可接真实模型并启动测试工作台 |

@@ -11,6 +11,7 @@
 | 理解实际执行路径与完成条件 | [工作流说明](docs/langgraph-workflow.md) → [源码目录与阅读顺序](docs/source-layout.md) |
 | 排查错误引用、输出格式或答案修订 | [内容反馈与修订](docs/content-feedback.md) |
 | 理解中断后能否继续、哪些调用不会重发 | [持久恢复](docs/durable-recovery.md) |
+| 创建有界的手动/周期任务、查看累计额度与跨轮交接 | [持续任务](docs/persistent-missions.md) |
 | 执行三组受控对照或查看报告边界 | [消融评估](docs/ablation-evaluation.md) |
 | 使用任务历史、来源页和导出报告 | [工作台说明](docs/project-workspace.md) |
 
@@ -41,7 +42,7 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 
 ## 模块职责
 
-生产代码按职责归入 `engine/`、`adapters/` 和 `web/`；独立的 `evaluation/` 只定义评估报告格式。实验执行器与合成测试端口保留在 `tests/`，不会打包进生产 wheel。完整目录、文件职责和迁移关系见 [源码目录说明](docs/source-layout.md)。
+生产代码按职责归入 `engine/`、`adapters/`、`web/` 和 `missions/`；`missions/` 管理单机持续目标、持久触发、累计预留与交接，独立的 `evaluation/` 只定义评估报告格式。实验执行器与合成测试端口保留在 `tests/`，不会打包进生产 wheel。完整目录、文件职责和迁移关系见 [源码目录说明](docs/source-layout.md)。
 
 | 组件 | 职责 |
 |---|---|
@@ -82,7 +83,9 @@ uv run --extra web --frozen python -m tests.isolated_runtime --config config.tom
 | [adapters/content_adapter.py](src/lake_agent/adapters/content_adapter.py) | 本地目录检索、答案生成与核验 |
 | [evaluation/models.py](src/lake_agent/evaluation/models.py) | 三组评估报告格式；不执行基线 |
 
-正式工作台支持完整 Agent 提问、来源目录、历史、真正删除任务及 JSON/HTML 报告。关闭核验与评估导入仅由测试宿主显式开启；正式入口默认不构造评估仓库、不创建评估目录。固定检索只在测试评估脚本中作为基线，不是应用运行模式。浏览器不接收凭据、模块导入路径或预算覆盖；配置与工厂留在服务端。来源页只展示注册目录，不等于读取了数据池全文；测试评估页只显示导入的实际结果，未知指标保持 null。页面和 HTTP 接口见 [工作台说明](docs/project-workspace.md)。
+正式工作台支持完整 Agent 提问、来源目录、历史、持续任务、普通任务删除及 JSON/HTML 报告。持续任务增加手动/固定延迟触发、累计轮数/模型/目录加工具调用/绝对期限限制，以及有界的跨轮交接；单轮可按 provider 实测用量执行累计 token 上限，美元费用仍只做实测统计。暂停和结束只停止后续领取，已有周期安全收尾；取消当前周期会先暂停父任务。Mission 所属 run 可查看、导出和取消，但不允许通过普通 resume/delete 绕过对账所有权。重启按持久身份和核心事实对账，结果未知时保留预留并阻塞，不换号重跑。完整语义和 API 示例见[持续任务说明](docs/persistent-missions.md)。
+
+关闭核验与评估导入仅由测试宿主显式开启；正式入口默认不构造评估仓库、不创建评估目录。固定检索只在测试评估脚本中作为基线，不是应用运行模式；宿主禁用 full_agent 时也不启动持续任务调度。浏览器不接收凭据、模块导入路径或任意运行预算覆盖；持续任务只接收固定字段的有界累计限制，配置与工厂仍留在服务端。来源页只展示注册目录，不等于读取了数据池全文；测试评估页只显示导入的实际结果，未知指标保持 null。页面和 HTTP 接口见 [工作台说明](docs/project-workspace.md)。
 
 失败结果可携带 `failure.phase/call_id/error`，页面展开具体字段差异、允许的证据 ID 和被拒输出预览；旧历史从已有失败事件回退展示，不补造未保存内容。修正成功后清除当前错误，历史事件保留；未解决内容反馈不能直接 finish，强制核验要求当前有效的 supported 核验。
 
@@ -107,4 +110,4 @@ API 凭据是否可用、提供方响应兼容性及真实数据答案质量仍�
 
 支持 macOS/Linux/WSL，工作台与 SQLite 恢复依赖同一 POSIX 主机的可信本地文件系统。应用只监听回环地址，不提供登录、多用户权限或公网部署。共享适配器必须可重入；每次尝试使用独立 trace。
 
-当前不支持累计 token 硬预算、跨版本恢复、动态 worker 委派或外部副作用 exactly-once。未测量 token/cost 保持 null。超时与取消依赖适配器合作，不能强制终止阻塞线程或忽略取消的协程。完整语义仍以接口契约为准。
+当前不支持跨版本恢复、动态 worker 委派或外部副作用 exactly-once。配置 token 上限时，provider 必须回报实际 input/output token；缺测会 fail closed。未测量 token/cost 保持 null。超时与取消依赖适配器合作，不能强制终止阻塞线程或忽略取消的协程。完整语义仍以接口契约为准。

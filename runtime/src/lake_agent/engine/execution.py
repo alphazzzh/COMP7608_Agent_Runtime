@@ -10,12 +10,47 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
 from .. import models as m
 from ..validation import canonical_json
+from .errors import RunStopped
+
+if TYPE_CHECKING:
+    from .recovery import RecoverySession
+
+
+async def await_adapter_response(
+    method, request, response_type, *, deadline, max_output_bytes, on_dispatch=None
+):
+    """仅给适配器等待设限；复制请求并按原身份验证回复，写入由调用方处理。"""
+    loop = asyncio.get_running_loop()
+    adapter_request = request.model_copy(deep=True)
+    if loop.time() >= deadline:
+        raise TimeoutError
+    owner = asyncio.current_task()
+    cancellation_requests = owner.cancelling() if owner is not None else 0
+    try:
+        async with asyncio.timeout_at(deadline):
+            if on_dispatch is not None:
+                on_dispatch()
+            raw = await method(adapter_request)
+    finally:
+        # timeout_at 会撤回自己的取消。适配器即使吞掉调用方取消，也不能继续结算。
+        if owner is not None and owner.cancelling() > cancellation_requests:
+            raise asyncio.CancelledError
+    if loop.time() >= deadline:
+        raise TimeoutError  # 拒绝适配器吞掉期限取消后返回的迟到响应。
+    # model_copy(update=...) 可绕过 Pydantic；始终从 JSON 重新验证适配器回复。
+    raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
+    if len(canonical_json(raw)) > max_output_bytes:
+        raise ValueError("response exceeds max_output_bytes")
+    response = response_type.model_validate(raw)
+    if response.call_id != request.call_id:
+        raise ValueError("response call_id mismatch")
+    return response
 
 
 @dataclass
@@ -48,37 +83,52 @@ async def invoke_tool_attempt(
     method: Callable[[m.ToolRequest], Awaitable[Any]],
     *,
     max_output_bytes: int,
+    recovery: RecoverySession | None = None,
 ) -> ToolOutcome:
-    """等待一次适配器调用，传播取消，并验证响应。
-
-    协作式超时无法强制适配器结束，因此必须显式拒绝适配器吞掉截止时间取消后才返回的
-    响应。每次普通返回都会保存结果；取消时不虚构响应或失败，避免控制器误认为
-    工具结果已经确定。
-    """
+    """只标记实际派发和已验证的结果；已知响应的持久化不受单次调用期限截断。"""
     loop = asyncio.get_running_loop()
-    owner = asyncio.current_task()
-    cancellation_requests = owner.cancelling() if owner is not None else 0
-    if loop.time() >= attempt.deadline:
+    replayable = recovery is not None and recovery.has_cached_response(attempt.request.call_id)
+    if loop.time() >= attempt.deadline and not replayable:
         attempt.outcome = ToolOutcome(kind="timeout", duration_ms=0)
         return attempt.outcome
 
+    def dispatched():
+        attempt.started_at = loop.time()
+
+    def elapsed_ms():
+        return (
+            max(0, int((loop.time() - attempt.started_at) * 1000))
+            if attempt.started_at is not None
+            else 0
+        )
+
+    def known(response):
+        # 先标记已知结果；取消若发生于 SQLite 结算期间，审计仍能区分已返回和未知。
+        attempt.outcome = ToolOutcome(kind="response", duration_ms=elapsed_ms(), response=response)
+
     try:
-        async with asyncio.timeout_at(attempt.deadline):
-            # 此赋值须紧邻适配器 await：审计意图或等待调度名额所耗时间
-            # 不等于实际派发。
-            attempt.started_at = loop.time()
-            raw = await method(attempt.request)
-        if loop.time() >= attempt.deadline:
-            raise TimeoutError
-        # 适配器持有的模型不能直接视为可信的已验证实例：调用方可通过
-        # model_copy(update=...) 绕过 Pydantic 验证，因此须重建模型。
-        raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
-        if len(canonical_json(raw)) > max_output_bytes:
-            raise ValueError("response exceeds max_output_bytes")
-        response = m.ToolResult.model_validate(raw)
-        if response.call_id != attempt.request.call_id:
-            raise ValueError("response call_id mismatch")
-    except asyncio.CancelledError:
+        if recovery is None:
+            known(
+                await await_adapter_response(
+                    method,
+                    attempt.request,
+                    m.ToolResult,
+                    deadline=attempt.deadline,
+                    max_output_bytes=max_output_bytes,
+                    on_dispatch=dispatched,
+                )
+            )
+        else:
+            await recovery.invoke(
+                "tool",
+                method,
+                attempt.request,
+                m.ToolResult,
+                deadline=attempt.deadline,
+                on_dispatch=dispatched,
+                on_response=known,
+            )
+    except (asyncio.CancelledError, RunStopped):
         raise
     except TimeoutError as exc:
         outcome = ToolOutcome(kind="timeout", duration_ms=0, error_type=type(exc).__name__)
@@ -87,15 +137,10 @@ async def invoke_tool_attempt(
     except Exception as exc:
         outcome = ToolOutcome(kind="exception", duration_ms=0, error_type=type(exc).__name__)
     else:
-        outcome = ToolOutcome(kind="response", duration_ms=0, response=response)
+        assert attempt.outcome is not None
+        return attempt.outcome
 
-    # timeout_at 退出时会移除自身的取消请求。剩余新增请求属于
-    # 调用方，即使适配器吞掉 CancelledError 后返回响应或抛出其他
-    # 错误也如此；绝不能将这种情况当作成功。
-    if owner is not None and owner.cancelling() > cancellation_requests:
-        raise asyncio.CancelledError
-    assert attempt.started_at is not None
-    outcome.duration_ms = max(0, int((loop.time() - attempt.started_at) * 1000))
+    outcome.duration_ms = elapsed_ms()
     attempt.outcome = outcome
     return outcome
 

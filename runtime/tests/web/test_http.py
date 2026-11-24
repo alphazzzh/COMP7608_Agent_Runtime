@@ -573,7 +573,7 @@ async def test_product_metadata_declares_only_full_agent_without_experiments(tmp
         response = await client.get("/api/info")
     assert response.status_code == 200
     assert response.json()["enabled_modes"] == ["full_agent"]
-    assert response.json()["features"] == {"evaluations": False}
+    assert response.json()["features"] == {"evaluations": False, "missions": True}
     assert not (tmp_path / "unopened").exists()
 
 
@@ -627,7 +627,7 @@ async def test_trusted_host_opt_in_drives_metadata_template_and_admission(tmp_pa
             "/api/runs", json={"question": "Inspect", "mode": "no_verifier"}
         )
     assert info["enabled_modes"] == ["full_agent", "no_verifier"]
-    assert info["features"] == {"evaluations": True}
+    assert info["features"] == {"evaluations": True, "missions": True}
     assert [result["mode"] for result in template["results"]] == [
         "fixed_retrieval",
         "no_verifier",

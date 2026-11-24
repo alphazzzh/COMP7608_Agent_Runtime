@@ -65,7 +65,7 @@ async def test_valid_tool_reply_is_returned_without_controller_policy(failed):
 
     async def invoke(request):
         assert current.dispatched
-        assert request is current.request
+        assert request is not current.request
         if failed:
             return m.ToolResult(
                 call_id=request.call_id,
@@ -83,6 +83,23 @@ async def test_valid_tool_reply_is_returned_without_controller_policy(failed):
     assert current.started_at is not None
 
 
+async def test_adapter_mutating_request_cannot_change_original_call_identity_or_arguments():
+    """工具适配器可改自己的副本，但不能污染控制器持有的授权请求。"""
+    current = attempt()
+    current.request.args["nested"] = {"values": [1]}
+
+    async def mutating(request):
+        request.call_id = "forged-call-id"
+        request.args["nested"]["values"].append(2)
+        return m.ToolResult(call_id="call-execution", data={"value": 7})
+
+    outcome = await invoke_tool_attempt(current, mutating, max_output_bytes=4096)
+
+    assert outcome.kind == "response"
+    assert current.request.call_id == "call-execution"
+    assert current.request.args == {"source_id": "source-a", "nested": {"values": [1]}}
+
+
 async def test_expired_deadline_never_dispatches_the_adapter():
     current = attempt(timeout=-1)
 
@@ -95,6 +112,50 @@ async def test_expired_deadline_never_dispatches_the_adapter():
     assert outcome.duration_ms == 0
     assert not current.dispatched
     assert current.outcome is outcome
+
+
+async def test_expired_attempt_replays_cached_reply_without_adapter_dispatch():
+    """已知回复重放不应再受原始单次适配器等待期限限制。"""
+    current = attempt(timeout=-1)
+    replayed = m.ToolResult(call_id=current.request.call_id, data={"cached": True})
+    calls = []
+
+    class CachedRecovery:
+        def has_cached_response(self, call_id):
+            return call_id == current.request.call_id
+
+        async def invoke(
+            self,
+            phase,
+            method,
+            request,
+            response_type,
+            *,
+            deadline,
+            on_dispatch=None,
+            on_response=None,
+        ):
+            calls.append((phase, request.call_id, deadline))
+            if on_dispatch is not None:
+                on_dispatch()
+            if on_response is not None:
+                on_response(replayed)
+            return replayed
+
+    async def forbidden_dispatch(request):
+        raise AssertionError("Cached replies must not reach the adapter")
+
+    outcome = await invoke_tool_attempt(
+        current,
+        forbidden_dispatch,
+        max_output_bytes=4096,
+        recovery=CachedRecovery(),
+    )
+
+    assert outcome.kind == "response"
+    assert outcome.response == replayed
+    assert current.dispatched
+    assert len(calls) == 1
 
 
 async def test_running_attempt_times_out_and_observes_adapter_cancellation():

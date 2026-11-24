@@ -153,6 +153,29 @@ async def test_operations_without_new_verification_inputs_do_not_force_reverific
     assert planner.requests[-1].context["verification_verdict"] == "supported"
 
 
+async def test_optional_subset_verification_remains_current_for_the_checked_evidence():
+    result, planner, content, _, _ = await execute_freshness(
+        [
+            revenue_tool("a"),
+            revenue_tool("b", "confirmation"),
+            {"kind": "compose"},
+            lambda request: {
+                "kind": "verify",
+                "evidence_ids": [request.context["evidence_summary"][0]["evidence_id"]],
+            },
+            {"kind": "finish"},
+        ],
+        require_verification=False,
+    )
+
+    assert result.status == "completed"
+    assert len(content.verifications) == 1
+    assert len(content.verifications[0].evidence) == 1
+    finish_request = planner.requests[-1]
+    assert finish_request.context["verification_status"] == "current"
+    assert finish_request.context["verification_verdict"] == "supported"
+
+
 async def test_stale_negative_verdict_is_not_a_current_rejection_when_verification_is_optional():
     result, planner, content, _, _ = await execute_freshness(
         [

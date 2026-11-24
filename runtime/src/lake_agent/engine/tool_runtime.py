@@ -59,6 +59,9 @@ class ToolExecutionMixin:
         for call_id, attempt in self.tool_attempts.items():
             request = attempt.request
             if attempt.dispatched:
+                step = self.accepted_steps.get(request.step_id)
+                if step is not None:
+                    self.dispatched_sources.update(step.source_ids)
                 if request.step_id not in self.started_tool_steps:
                     self.started_tool_steps.add(request.step_id)
                     self.counts.steps += 1
@@ -91,6 +94,8 @@ class ToolExecutionMixin:
     async def _prepare_tool_attempt(self, step, operation_id, number):
         """在任何适配器 I/O 前预留一次实际调用尝试并提交意图。"""
         self._time()
+        # 在每个物理尝试前检查已知字节用量，未知值不能绕过已启用的硬预算。
+        self._check_external_data_budget()
         if self.counts.catalog + self.counts.tools >= self.cfg.max_data_calls:
             raise RunStopped("budget_exceeded", "data_call_budget")
         deadline = min(self.deadline, self.loop.time() + self.cfg.per_call_timeout_ms / 1000)
@@ -122,8 +127,11 @@ class ToolExecutionMixin:
             self.pending_tool_calls.pop(request.call_id)
             raise
         self.pending_tool_calls[request.call_id]["intent_committed"] = True
-        if self.loop.time() >= deadline:
-            global_timeout = self.loop.time() >= self.deadline
+        replayable = self.recovery is not None and self.recovery.has_cached_response(
+            request.call_id
+        )
+        global_timeout = self.loop.time() >= self.deadline
+        if global_timeout or (self.loop.time() >= deadline and not replayable):
             await self._event(
                 "tool.call.failed",
                 status="timeout",
@@ -170,8 +178,9 @@ class ToolExecutionMixin:
                     asyncio.create_task(
                         invoke_tool_attempt(
                             attempt,
-                            self._invoke_tool_port,
+                            self.data.invoke,
                             max_output_bytes=self.cfg.max_output_bytes_per_call,
+                            recovery=self.recovery,
                         )
                     )
                 )
@@ -204,7 +213,13 @@ class ToolExecutionMixin:
         self._sync_tool_dispatches()
         if outcome.kind == "response":
             result = outcome.response
+            # 工具不经过通用 _call；在此结算适配器实测量，缺失字段保留为未知。
+            self._record_external_usage(result)
             ref = await self._artifact(result)
+            if result.status == "error":
+                self.failure = m.RunFailure(
+                    phase="tool", call_id=request.call_id, error=result.error
+                )
             await self._event(
                 "tool.call.completed" if result.status == "ok" else "tool.call.failed",
                 status=result.status,
@@ -215,8 +230,18 @@ class ToolExecutionMixin:
             )
             await self._observe(request, result, ref)
             self.active_tool_calls.pop(request.call_id)
+            try:
+                self._check_external_data_budget()
+            except RunStopped as stop:
+                error = m.ErrorInfo(
+                    code=stop.reason,
+                    message="External data budget or measurement requirement was not satisfied.",
+                )
+                self.failure = m.RunFailure(phase="tool", call_id=request.call_id, error=error)
+                return result, error, stop
             return result, result.error, None
         if outcome.kind == "timeout":
+            self._record_external_usage()
             error = m.ErrorInfo(
                 code="timeout", message="Cooperative call deadline exceeded", retryable=True
             )
@@ -229,15 +254,18 @@ class ToolExecutionMixin:
                 },
             )
         elif outcome.kind == "invalid_response":
+            self._record_external_usage()
             error = m.ErrorInfo(
                 code="invalid_response", message="Adapter returned an invalid response."
             )
             reason = RunStopped("failed", "invalid_module_response")
             status, detail = "invalid_response", {"error_type": outcome.error_type}
         else:
+            self._record_external_usage()
             error = m.ErrorInfo(code="adapter_error", message="Adapter call failed.")
             reason = RunStopped("failed", "tool_error")
             status, detail = "error", {"error_type": outcome.error_type}
+        self.failure = m.RunFailure(phase="tool", call_id=request.call_id, error=error)
         await self._event(
             "tool.call.failed",
             status=status,
@@ -267,15 +295,24 @@ class ToolExecutionMixin:
             for item in incoming
         ):
             raise RunStopped("failed", "invalid_module_response")
-        for item in incoming:
-            record = m.EvidenceRecord(
+        records = [
+            m.EvidenceRecord(
                 **item.model_dump(), evidence_id=self._id("ev"), call_id=result.call_id
             )
+            for item in incoming
+        ]
+        candidate = [*self.evidence, *records]
+        candidate_bytes = len(canonical_json([item.model_dump(mode="json") for item in candidate]))
+        if candidate_bytes > self.cfg.max_evidence_bytes:
+            # 先校验完整批次，再写工件和更新内存，避免部分接纳超额证据。
+            raise RunStopped("budget_exceeded", "evidence_budget")
+        for record in records:
             await self._write(
                 lambda r=record: self.trace.put_artifact(r.evidence_id, r.model_dump(mode="json"))
             )
             self.evidence.append(record)
             await self._event("evidence.added", data_ref=record.evidence_id, step_id=step.step_id)
+        self.evidence_bytes = candidate_bytes
         self.visited.update(step.source_ids)
 
     def _tool_failure_policy(self, step, attempt, result, error, hard_stop):
@@ -301,6 +338,12 @@ class ToolExecutionMixin:
         )
         return "stop", RunStopped("failed", reason)
 
+    def _tool_width_limit(self) -> int:
+        """启用外部字节预算时退化为串行派发，确保单步超限后立即止损。"""
+        return (
+            1 if self.cfg.max_external_data_bytes is not None else self.cfg.max_parallel_tool_calls
+        )
+
     async def _execute_tool_wave(self, wave):
         """先结算已启动的同批任务，再决定重试、重新规划或停止。"""
         entries = [(step, self._id("op"), 1) for step in wave]
@@ -312,7 +355,7 @@ class ToolExecutionMixin:
             remaining = self.cfg.max_data_calls - self.counts.catalog - self.counts.tools
             if remaining <= 0:
                 raise RunStopped("budget_exceeded", "data_call_budget")
-            width = min(self.cfg.max_parallel_tool_calls, remaining)
+            width = min(self._tool_width_limit(), remaining)
             entries, deferred = entries[:width], entries[width:]
             attempts = await self._gather_tool_attempts(entries)
             # 全局终止可能打断正常结果持久化。将所有已缓冲结果
@@ -322,20 +365,34 @@ class ToolExecutionMixin:
             retry, final_stops, recover = [], [], []
             for (step, operation_id, number), attempt in zip(entries, attempts, strict=True):
                 result, error, hard_stop = await self._settle_tool_attempt(attempt)
-                if result is not None and result.status == "ok":
+                if result is not None and result.status == "ok" and hard_stop is None:
                     try:
                         await self._apply_tool_evidence(step, result)
                     except RunStopped as stop:
                         if self.trace_broken:
                             raise
-                        error, hard_stop = (
-                            m.ErrorInfo(
-                                code="invalid_response",
-                                message="Tool evidence violates provenance or schema.",
-                            ),
-                            stop,
+                        code = (
+                            "invalid_response"
+                            if stop.reason == "invalid_module_response"
+                            else stop.reason
+                        )
+                        message = (
+                            "Tool evidence violates provenance or schema."
+                            if code == "invalid_response"
+                            else "The accepted tool result exceeded the evidence budget."
+                        )
+                        error, hard_stop = m.ErrorInfo(code=code, message=message), stop
+                        self.failure = m.RunFailure(
+                            phase="tool", call_id=attempt.request.call_id, error=error
                         )
                     else:
+                        if self.failure is not None and self.failure.phase == "tool":
+                            failed_attempt = self.tool_attempts.get(self.failure.call_id)
+                            if (
+                                failed_attempt is not None
+                                and failed_attempt.request.step_id == step.step_id
+                            ):
+                                self.failure = None
                         await self._tool_step_state(step.step_id, "succeeded")
                         succeeded.add(step.step_id)
                         continue
@@ -348,7 +405,14 @@ class ToolExecutionMixin:
                 if policy == "recover":
                     recover.append((step, error))
                 else:
-                    final_stops.append(stop)
+                    final_stops.append(
+                        (
+                            stop,
+                            m.RunFailure(
+                                phase="tool", call_id=attempt.request.call_id, error=error
+                            ),
+                        )
+                    )
             if final_stops or recover:
                 # 同批任务失败后，重试其他操作会成为本批停止决策后的
                 # 新增派发。它们最后一次明确错误保持已提交状态，
@@ -361,7 +425,10 @@ class ToolExecutionMixin:
                     await self._tool_step_state(step.step_id, "failed")
                 for step, error in recover:
                     await self._event("tool.replan_requested", step_id=step.step_id, error=error)
-                return succeeded, failed, final_stops[0] if final_stops else None
+                if final_stops:
+                    self.failure = final_stops[0][1]
+                    return succeeded, failed, final_stops[0][0]
+                return succeeded, failed, None
             entries = list(deferred)
             for step, operation_id, number, previous in retry:
                 delay = random.uniform(0, min(0.05 * 2 ** min(number - 2, 6), 1.0))
@@ -405,7 +472,7 @@ class ToolExecutionMixin:
                 if remaining <= 0:
                     raise RunStopped("budget_exceeded", "data_call_budget")
                 wave = select_ready_wave(
-                    pending, succeeded, self.specs, min(self.cfg.max_parallel_tool_calls, remaining)
+                    pending, succeeded, self.specs, min(self._tool_width_limit(), remaining)
                 )
                 if not wave:
                     raise RunStopped("failed", "invalid_plan")

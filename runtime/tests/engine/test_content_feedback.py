@@ -306,6 +306,7 @@ def test_minimum_context_prioritizes_complete_current_page_over_feedback_preview
     )
     controller = SimpleNamespace(
         cfg=m.RunConfig(max_planner_context_bytes=1024, planner_preview_bytes=512),
+        req=m.RunRequest(task_id="feedback-context", question="Check current evidence"),
         content_feedback={"compose": feedback},
         sources={},
         evidence=[],
@@ -337,6 +338,7 @@ def test_stale_page_may_be_omitted_when_feedback_and_working_memory_markers_need
 
     controller = SimpleNamespace(
         cfg=m.RunConfig(max_planner_context_bytes=1024, planner_preview_bytes=512),
+        req=m.RunRequest(task_id="feedback-context", question="Check current evidence"),
         sources={},
         evidence=[],
         observations=[],

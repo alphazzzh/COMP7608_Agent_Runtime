@@ -114,13 +114,33 @@ async def test_protected_or_unknown_params_fail_before_dispatch(params: dict[str
     assert not calls
 
 
-async def test_token_caps_rejected_without_matching_tokenizer() -> None:
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: None)) as client:
-        result = await JsonPlanner("https://planner.example/v1", "key", client=client).decide(
-            request(token_budget=TokenBudget(remaining_input_tokens=100))
+async def test_token_budget_caps_output_and_reports_measured_usage() -> None:
+    calls = []
+
+    def respond(incoming):
+        calls.append(json.loads(incoming.content))
+        return httpx.Response(
+            200,
+            json=provider_response(
+                {"kind": "compose"},
+                usage={"prompt_tokens": 42, "completion_tokens": 24},
+            ),
         )
-    assert result.error.code == "token_budget_unsupported"
-    assert result.usage.provider_requests == 0
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await JsonPlanner("https://planner.example/v1", "key", client=client).decide(
+            request(
+                token_budget=TokenBudget(
+                    remaining_input_tokens=100,
+                    remaining_output_tokens=24,
+                    max_output_tokens_this_call=24,
+                )
+            )
+        )
+    assert result.status == "ok"
+    assert calls[0]["max_tokens"] == 24
+    assert result.usage.input_tokens == 42 and result.usage.output_tokens == 24
+    assert result.usage.provider_requests == 1
 
 
 async def test_network_failure_counts_one_dispatched_request_and_leaks_no_secrets() -> None:
@@ -490,7 +510,6 @@ async def test_decide_returns_safe_output_errors_without_repair(content: str) ->
     [
         ({"model_params": {"messages": []}}, "invalid_model_params"),
         ({"model_params": {"temperature": True}}, "invalid_model_params"),
-        ({"token_budget": {"remaining_input_tokens": 100}}, "token_budget_unsupported"),
     ],
 )
 async def test_decide_rejects_unsupported_controls_before_dispatch(

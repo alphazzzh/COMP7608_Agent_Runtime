@@ -685,3 +685,69 @@ summary { cursor: pointer; }
 .capability-status.pending, .comparison-warning { color: #84682d; }
 .evaluation-import .import-status { color: #4b7746; }
 .evaluation-import .import-status.is-error { color: #9b4d38; }
+
+/* 持续任务复用工作台面板、状态与按钮，窄屏按表单、列表、详情顺序排列。 */
+.missions-layout { display: grid; grid-template-columns: minmax(265px, .8fr) minmax(0, 1.8fr); gap: 22px; align-items: start; }
+.mission-create { min-width: 0; }
+.mission-create .panel-heading { flex-wrap: wrap; gap: 5px; }
+.mission-create h2, .mission-browser > .panel-heading h2 { font-size: 14px; font-weight: 600; }
+.mission-form { padding: 20px; display: grid; gap: 16px; }
+.mission-field { display: grid; gap: 6px; min-width: 0; font-size: 12px; font-weight: 550; }
+.mission-field input, .mission-field select, .mission-field textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 6px; padding: 9px 10px; background: #fff; font-weight: 400; }
+.mission-field textarea { resize: vertical; line-height: 1.8; }
+.mission-field small, .mission-form-note { font-size: 11px; line-height: 1.8; font-weight: 400; color: #63765c; overflow-wrap: anywhere; }
+.mission-limits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-top: 15px; border-top: 1px solid var(--line); }
+.mission-limits-title { grid-column: 1 / -1; font-size: 12px; font-weight: 600; }
+.mission-check { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; }
+.mission-check input { margin-top: 5px; accent-color: var(--teal); }
+.mission-browser { min-width: 0; }
+.mission-browser > .panel-heading { padding: 0 0 12px; min-height: 30px; }
+.missions-list { display: grid; gap: 9px; max-height: 330px; overflow-y: auto; padding: 2px; margin: -2px -2px 18px; }
+.missions-list > .empty-state { border: 1px dashed var(--line-strong); border-radius: 9px; }
+.mission-card { display: grid; gap: 6px; width: 100%; min-width: 0; padding: 15px 17px; text-align: left; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.mission-card:hover, .mission-card.is-selected { border-color: #95bca0; background: #f3f8ef; }
+.mission-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mission-card-heading strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.mission-card-question { font-size: 12px; color: #536c50; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mission-card small { color: #63765c; font-size: 10px; }
+.mission-status-active { color: #2f7953; background: #edf5e5; }
+.mission-status-paused { color: #84682d; background: #faf6e7; }
+.mission-status-completed { color: #52714d; background: #edf3e7; }
+.mission-status-blocked { color: #9b4d38; background: #fcf0eb; }
+.mission-detail { padding: 23px; min-width: 0; }
+.mission-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.mission-detail-heading h2 { font-size: 20px; line-height: 1.5; overflow-wrap: anywhere; }
+.mission-detail-heading .status-badge { flex: none; }
+.mission-question { margin-top: 12px; font-size: 13px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; color: #536c50; }
+.mission-id { display: block; margin-top: 9px; font-size: 10px; color: #63765c; overflow-wrap: anywhere; }
+.mission-metadata { margin: 20px 0; font-size: 12px; grid-template-columns: 78px minmax(0, 1fr); }
+.mission-usage { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 18px 0; }
+.mission-usage-card { display: grid; gap: 4px; padding: 11px; border: 1px solid var(--line); background: #fafcf6; border-radius: 7px; min-width: 0; }
+.mission-usage-card span, .mission-usage-card small { font-size: 10px; color: #63765c; }
+.mission-usage-card strong { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.mission-actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 17px 0 10px; }
+.mission-handoff, .mission-triggers { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 21px; }
+.mission-handoff h3, .mission-triggers h3 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.mission-handoff > p:not(.detail-footnote) { font-size: 12px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 10px; }
+.mission-handoff .unresolved-list { margin: 9px 0; }
+.mission-handoff .mission-artifacts { font-size: 10px !important; color: #63765c; margin-top: 8px; }
+.mission-trigger { display: flex; flex-wrap: wrap; gap: 5px 12px; border-top: 1px solid #edf1e8; padding: 12px 0; font-size: 11px; align-items: center; }
+.mission-trigger strong { font-weight: 550; width: 100%; }
+.mission-trigger small, .mission-trigger code { font-size: 10px; color: #63765c; overflow-wrap: anywhere; }
+.mission-trigger p { width: 100%; overflow-wrap: anywhere; }
+.mission-error { padding: 10px 12px; border: 1px solid #eedacd; background: #fcf0eb; color: #9b4d38; font-size: 12px; border-radius: 6px; overflow-wrap: anywhere; }
+@media (max-width: 1080px) {
+  .missions-layout { grid-template-columns: minmax(240px, .85fr) minmax(0, 1.3fr); gap: 16px; }
+  .mission-form, .mission-detail { padding: 17px; }
+  .mission-usage { grid-template-columns: minmax(0, 1fr); }
+  .mission-usage-card { grid-template-columns: 1fr 1.2fr; }
+  .mission-usage-card small { grid-column: 2; }
+}
+@media (max-width: 760px) {
+  .missions-layout { grid-template-columns: minmax(0, 1fr); }
+  .mission-usage { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mission-usage-card { display: grid; grid-template-columns: minmax(0, 1fr); padding: 9px; }
+  .mission-usage-card small { grid-column: auto; }
+  .mission-detail-heading h2 { font-size: 17px; }
+  .mission-card { padding: 13px; }
+}

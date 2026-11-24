@@ -13,7 +13,16 @@
     insufficient_evidence: "证据不足", budget_exceeded: "预算停止", timeout: "执行超时",
     error: "执行错误", cancelled: "已停止",
   };
-  const VIEW_TITLES = { workbench: "智能问答", sources: "数据来源", history: "任务历史", evaluations: "实验评估" };
+  const VIEW_TITLES = { workbench: "智能问答", sources: "数据来源", history: "任务历史", missions: "持续任务", evaluations: "实验评估" };
+  const MISSION_STATUS = { active: "进行中", paused: "已暂停", completed: "已结束", blocked: "已阻塞" };
+  const TRIGGER_STATUS = { pending: "待领取", claimed: "已领取", running: "运行中", completed: "已完成", blocked: "已阻塞", cancelled: "已取消" };
+  // 这里只开放有界累计调用和时长；单轮权限与预算始终由已有 profile 决定。
+  const MISSION_LIMITS = [
+    ["max_runs", "mission-max-runs", "最大轮数", 100],
+    ["max_model_calls", "mission-max-model-calls", "模型调用", 10000],
+    ["max_data_calls", "mission-max-data-calls", "数据调用", 10000],
+    ["max_duration_seconds", "mission-max-duration", "持续时长", 604800],
+  ];
   const MODE_TITLES = { full_agent: "完整 Agent", no_verifier: "关闭核验" };
   // 固定检索仅是报告中的对照组，不加入执行模式选择器。
   const EVALUATION_MODE_TITLES = { ...MODE_TITLES, fixed_retrieval: "固定 Top-k 基线" };
@@ -63,6 +72,14 @@
     evaluationsLoading: false, evaluationLoading: false, evaluationImporting: false,
     evaluationListError: null, evaluationError: null, evaluationsVersion: 0,
     evaluationVersion: 0, evaluationUserVersion: 0,
+    missions: [], missionId: null, mission: null, missionProfileId: null, missionScheduler: null,
+    missionsLoading: false, missionLoading: false, missionCreating: false,
+    missionsError: null, missionError: null, missionMutation: null,
+    missionListVersion: 0, missionVersion: 0, missionUserVersion: 0,
+    missionEpoch: 0, missionPollTimer: null, missionPollGeneration: 0,
+    missionPollInFlight: false, missionDetailRequests: new Map(),
+    missionWakeEvents: new Map(), missionActionButtons: [],
+    missionListSignature: null, missionDetailSignature: null,
   };
 
   /** 使用 textContent 构造 DOM 节点，将服务端和用户提供的字符串保持为纯文本。 */
@@ -170,6 +187,8 @@
   function setView(view, focus = false) {
     if (!Object.hasOwn(VIEW_TITLES, view)) return;
     if (view === "evaluations" && state.info?.features?.evaluations !== true) view = "workbench";
+    if (view === "missions" && state.info?.features?.missions !== true) view = "workbench";
+    if (state.view === "missions" && view !== "missions") stopMissionPolling();
     state.view = view;
     for (const button of document.querySelectorAll("[data-view]")) {
       const selected = button.dataset.view === view;
@@ -183,6 +202,7 @@
     if (view === "history") renderHistory();
     if (view === "sources") { renderSources(); if (state.sourcesLoadedProfileId !== state.sourcesProfileId && !state.sourcesLoading) refreshSources(); }
     if (view === "evaluations") refreshEvaluations();
+    if (view === "missions") { renderMissions(); refreshMissions(); scheduleMissionPoll(); }
     window.history.replaceState(null, "", `#${view}`);
   }
 
@@ -285,6 +305,7 @@
     if (!selectedProfile()) renderProfile();
     if (!state.profiles.some((profile) => profile.profile_id === state.sourcesProfileId)) state.sourcesProfileId = initial?.profile_id || null;
     $("sources-profile").value = state.sourcesProfileId || "";
+    renderMissionProfiles();
     renderRecentRuns();
     renderHistory();
     if (state.view === "sources") refreshSources();
@@ -305,6 +326,9 @@
     $("mode").disabled = enabled.length === 1;
     document.querySelector('[data-view="evaluations"]').hidden = state.info?.features?.evaluations !== true;
     if (state.view === "evaluations" && state.info?.features?.evaluations !== true) setView("workbench");
+    document.querySelector('[data-view="missions"]').hidden = state.info?.features?.missions !== true;
+    if (state.view === "missions" && state.info?.features?.missions !== true) setView("workbench");
+    renderMissionControls();
     renderCapabilities();
   }
 
@@ -339,10 +363,12 @@
     $("cancel-run").disabled = state.mutation;
     $("resume-run").hidden = !run?.can_resume || isActive(run);
     $("resume-run").disabled = state.mutation;
-    $("delete-run").disabled = state.mutation || !run || isActive(run);
-    $("delete-run").title = isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
+    $("delete-run").disabled = state.mutation || !run || isActive(run) || Boolean(run?.mission_id);
+    $("delete-run").title = run?.mission_id
+      ? "持续任务关联运行需保留用于对账和审计。"
+      : isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
     for (const button of document.querySelectorAll('[data-action="delete"]')) {
-      button.disabled = state.mutation || button.dataset.active === "true";
+      button.disabled = state.mutation || button.dataset.active === "true" || button.dataset.missionOwned === "true";
     }
     if (run) {
       const prefix = `/api/runs/${encodeURIComponent(run.run_id)}`;
@@ -449,8 +475,11 @@
     button.dataset.runId = run.run_id;
     button.dataset.action = "delete";
     button.dataset.active = String(isActive(run));
-    button.disabled = state.mutation || isActive(run);
-    button.title = isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
+    button.dataset.missionOwned = String(Boolean(run.mission_id));
+    button.disabled = state.mutation || isActive(run) || Boolean(run.mission_id);
+    button.title = run.mission_id
+      ? "持续任务关联运行需保留用于对账和审计。"
+      : isActive(run) ? "请先停止任务，等待清理完成后再删除。" : "删除任务及其日志、证据和恢复记录";
     button.setAttribute("aria-label", `删除任务：${run.question}`);
     button.addEventListener("click", () => deleteRun(run.run_id));
     return button;
@@ -490,6 +519,7 @@
     if (!runId || state.mutation) return;
     const run = state.selectedRunId === runId && state.run ? state.run : state.runs.find((item) => item.run_id === runId);
     if (!run) return;
+    if (run.mission_id) { showNotice("持续任务关联运行需保留用于对账和审计。"); return; }
     if (isActive(run)) { showNotice("请先停止任务，等待清理完成后再删除。"); return; }
     if (!window.confirm(`删除任务“${run.question}”？\n答案、执行日志、证据工件和 SQLite 恢复记录将一起删除，无法恢复。`)) return;
     state.mutation = true;
@@ -1543,6 +1573,347 @@
     }
   }
 
+  /** 将 epoch 秒转换为本地时间，避免误把持久任务时间当作毫秒。 */
+  function missionDate(value, empty = "未安排") {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return empty;
+    return dateLabel(Number(value) * 1000);
+  }
+
+  function missionsVisible() {
+    return state.info?.features?.missions === true && state.view === "missions" && !document.hidden && !state.stopped;
+  }
+
+  /** 每次离开、隐藏或进入 BFCache 时使旧任务响应失效，并停止任务轮询。 */
+  function stopMissionPolling() {
+    window.clearTimeout(state.missionPollTimer);
+    state.missionPollTimer = null;
+    state.missionPollGeneration += 1;
+    state.missionEpoch += 1;
+    state.missionDetailRequests.clear();
+  }
+
+  /** 任务页面专用轮询：固定延迟、有界等待、不可见时不请求且不重叠。 */
+  function scheduleMissionPoll() {
+    window.clearTimeout(state.missionPollTimer);
+    state.missionPollTimer = null;
+    const generation = ++state.missionPollGeneration;
+    if (!missionsVisible()) return;
+    state.missionPollTimer = window.setTimeout(async () => {
+      if (!missionsVisible() || generation !== state.missionPollGeneration) return;
+      if (state.missionPollInFlight || state.missionsLoading || state.missionMutation || state.missionCreating) { scheduleMissionPoll(); return; }
+      state.missionPollInFlight = true;
+      try { await refreshMissions(true); }
+      finally {
+        state.missionPollInFlight = false;
+        if (generation === state.missionPollGeneration) scheduleMissionPoll();
+      }
+    }, 3000);
+  }
+
+  /** 复用服务端已注册的配置，未就绪项可见但不可提交。 */
+  function renderMissionProfiles() {
+    const select = $("mission-profile");
+    const fragment = document.createDocumentFragment();
+    for (const profile of state.profiles) {
+      const option = node("option", "", `${profile.title} · ${profile.ready ? "已就绪" : "未就绪"}`);
+      option.value = profile.profile_id;
+      option.disabled = !profile.ready;
+      fragment.append(option);
+    }
+    if (!state.profiles.length) fragment.append(node("option", "", "尚未配置执行模块"));
+    if (!state.profiles.some((profile) => profile.ready && profile.profile_id === state.missionProfileId)) {
+      state.missionProfileId = state.profiles.find((profile) => profile.ready)?.profile_id || null;
+    }
+    select.replaceChildren(fragment);
+    select.value = state.missionProfileId || "";
+    select.disabled = !state.profiles.some((profile) => profile.ready) || state.missionCreating;
+    $("mission-profile-note").textContent = state.missionProfileId ? "每轮均使用此配置的权限、工具及单轮限制。" : "没有已就绪配置，暂时不能创建持续任务。";
+    renderMissionControls();
+  }
+
+  function renderMissionControls() {
+    const ready = state.profiles.some((profile) => profile.profile_id === $("mission-profile").value && profile.ready);
+    $("create-mission").disabled = state.missionCreating || !ready || state.info?.features?.missions !== true;
+    $("create-mission").textContent = state.missionCreating ? "正在创建…" : "创建持续任务 ↗";
+    $("mission-profile").disabled = state.missionCreating || !state.profiles.some((profile) => profile.ready);
+    $("mission-interval-field").hidden = $("mission-schedule").value !== "interval";
+    $("mission-interval").disabled = $("mission-schedule").value !== "interval" || state.missionCreating;
+    $("refresh-missions").disabled = state.missionsLoading;
+    for (const button of state.missionActionButtons) button.disabled = Boolean(state.missionMutation);
+  }
+
+  /** 同一列表请求只运行一次；旧列表不能重新选中用户已离开的任务。 */
+  async function refreshMissions(silent = false) {
+    if (!missionsVisible() || state.missionsLoading) return;
+    const version = ++state.missionListVersion;
+    const epoch = state.missionEpoch;
+    const userVersion = state.missionUserVersion;
+    state.missionsLoading = true;
+    state.missionsError = null;
+    renderMissionControls();
+    try {
+      const result = await api("/api/missions");
+      if (version !== state.missionListVersion || epoch !== state.missionEpoch || !missionsVisible()) return;
+      state.missions = safeArray(result.missions);
+      state.missionScheduler = result.scheduler || null;
+      renderMissionList();
+      if (userVersion === state.missionUserVersion && !state.missionId && state.missions.length) {
+        await selectMission(state.missions[0].mission_id, false);
+      } else if (state.missionId) await refreshMission(true);
+    } catch (error) {
+      if (version !== state.missionListVersion || epoch !== state.missionEpoch || !missionsVisible()) return;
+      state.missionsError = errorMessage(error);
+      renderMissionList();
+      if (!silent) showNotice(state.missionsError, true);
+    } finally {
+      // 列表锁保证只有这一个请求；创建可使响应失效，但不能遗留 loading 锁。
+      state.missionsLoading = false;
+      renderMissionList();
+      renderMissionControls();
+    }
+  }
+
+  /** 选择代次与共享请求共同防止旧详情覆盖新选择或重复请求。 */
+  async function selectMission(id, userInitiated = true) {
+    if (!id) return;
+    if (userInitiated) state.missionUserVersion += 1;
+    state.missionVersion += 1;
+    if (state.missionId !== id) { state.missionId = id; state.mission = null; state.missionError = null; }
+    renderMissionList();
+    await refreshMission(false);
+  }
+
+  async function refreshMission(silent = true) {
+    const id = state.missionId;
+    if (!id || !missionsVisible()) return;
+    const version = ++state.missionVersion;
+    const epoch = state.missionEpoch;
+    state.missionLoading = true;
+    renderMissionDetail();
+    let request = state.missionDetailRequests.get(id);
+    if (!request) {
+      request = api(`/api/missions/${encodeURIComponent(id)}`);
+      state.missionDetailRequests.set(id, request);
+      // 清理只属于本次读取的缓存身份；不触发额外请求。
+      request.finally(() => { if (state.missionDetailRequests.get(id) === request) state.missionDetailRequests.delete(id); }).catch(() => {});
+    }
+    try {
+      const mission = await request;
+      if (id !== state.missionId || version !== state.missionVersion || epoch !== state.missionEpoch || !missionsVisible()) return;
+      state.mission = mission;
+      state.missionError = null;
+      const index = state.missions.findIndex((item) => item.mission_id === id);
+      if (index >= 0) state.missions[index] = mission;
+      renderMissionList();
+    } catch (error) {
+      if (id !== state.missionId || version !== state.missionVersion || epoch !== state.missionEpoch || !missionsVisible()) return;
+      state.missionError = errorMessage(error);
+      if (!silent) showNotice(state.missionError, true);
+    } finally {
+      if (id === state.missionId && version === state.missionVersion) { state.missionLoading = false; renderMissionDetail(); }
+    }
+  }
+
+  function missionStatusBadge(status) {
+    return node("span", `status-badge mission-status-${Object.hasOwn(MISSION_STATUS, status) ? status : "unknown"}`, MISSION_STATUS[status] || status || "未知状态");
+  }
+
+  function renderMissionList() {
+    const visibleRows = state.missions.map((mission) => [mission.mission_id, mission.title, mission.question, mission.status, mission.started_runs, mission.limits?.max_runs, mission.next_wake_at]);
+    const signature = JSON.stringify([visibleRows, state.missionId, state.missionsError, state.missionScheduler, !state.missions.length && state.missionsLoading]);
+    if (signature === state.missionListSignature) return;
+    state.missionListSignature = signature;
+    const fragment = document.createDocumentFragment();
+    if (state.missionsError) fragment.append(node("p", "mission-error", `任务列表读取失败：${state.missionsError} 可点击刷新重试。`));
+    if (state.missionScheduler?.error) fragment.append(node("p", "mission-error", `持续任务调度器已停止：${state.missionScheduler.error.message || state.missionScheduler.error.code || "未知错误"}`));
+    else if (state.missionScheduler && !state.missionScheduler.running) fragment.append(node("p", "mission-warning", "持续任务调度器当前未运行。"));
+    for (const mission of state.missions) {
+      const button = node("button", `mission-card${mission.mission_id === state.missionId ? " is-selected" : ""}`);
+      button.type = "button";
+      button.dataset.missionId = mission.mission_id;
+      button.setAttribute("aria-pressed", String(mission.mission_id === state.missionId));
+      const heading = node("span", "mission-card-heading");
+      heading.append(node("strong", "", mission.title), missionStatusBadge(mission.status));
+      button.append(heading, node("span", "mission-card-question", mission.question), node("small", "", `${number(mission.started_runs)} / ${number(mission.limits?.max_runs)} 轮 · 下次 ${missionDate(mission.next_wake_at)}`));
+      button.addEventListener("click", () => selectMission(mission.mission_id));
+      fragment.append(button);
+    }
+    if (!state.missions.length && !state.missionsError) fragment.append(emptyState(state.missionsLoading ? "正在读取持续任务" : "还没有持续任务", "从左侧创建任务，首次运行会立即进入待办。", "⟳"));
+    $("missions-list").replaceChildren(fragment);
+    $("missions-count").textContent = `${state.missions.length} 个任务`;
+    $("nav-missions-count").textContent = String(state.missions.length);
+  }
+
+  function missionRunButton(runId, label = "查看运行 ↗") {
+    const button = node("button", "text-button", label);
+    button.type = "button";
+    button.addEventListener("click", () => openRun(runId));
+    return button;
+  }
+
+  /** 展示持久状态与交接线索；completed 只描述内核状态，不宣称外部正确。 */
+  function renderMissionDetail() {
+    const detail = $("mission-detail");
+    // 已有详情时，后台读取中的瞬态不影响可见内容，也不重建焦点所在按钮。
+    const detailSignature = JSON.stringify([state.mission, state.missionError, !state.mission && state.missionLoading, state.missionMutation, state.missionWakeEvents.get(state.missionId), state.profiles.find((profile) => profile.profile_id === state.mission?.profile_id)?.title]);
+    if (detailSignature === state.missionDetailSignature) return;
+    state.missionDetailSignature = detailSignature;
+    state.missionActionButtons = [];
+    const mission = state.mission;
+    if (!mission) {
+      detail.replaceChildren(emptyState(state.missionLoading ? "正在读取任务详情" : state.missionError ? "任务详情读取失败" : "选择一个持续任务", state.missionError || "查看累计额度、交接摘要和最近运行。", "⟳"));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    const heading = node("div", "mission-detail-heading");
+    heading.append(node("h2", "", mission.title), missionStatusBadge(mission.status));
+    fragment.append(heading, node("p", "mission-question", mission.question), node("code", "mission-id", mission.mission_id));
+    if (state.missionError) fragment.append(node("p", "mission-error", `详情刷新失败：${state.missionError} 当前显示上次读取的记录。`));
+    const metadata = node("dl", "detail-metadata mission-metadata");
+    for (const [label, value] of [
+      ["执行配置", state.profiles.find((profile) => profile.profile_id === mission.profile_id)?.title || mission.profile_id],
+      ["触发方式", mission.interval_seconds === null ? "手动唤醒" : `完成后等待 ${mission.interval_seconds} 秒`],
+      ["下次唤醒", missionDate(mission.next_wake_at)], ["截止时间", missionDate(mission.deadline_at, "未提供")],
+      ["累计时长上限", `${number(mission.limits?.max_duration_seconds)} 秒`],
+      ["已完成轮数", `${number(mission.completed_runs)} 轮`],
+      ["完成政策", mission.stop_on_completed ? "首个内核 completed 后结束" : "继续后续周期，直到额度或其他停止条件满足"],
+    ]) metadata.append(node("dt", "", label), node("dd", "", value));
+    fragment.append(metadata);
+    const usage = node("div", "mission-usage");
+    for (const [label, used, reserved, max] of [
+      ["运行轮数", mission.started_runs, mission.active_trigger_id ? 1 : 0, mission.limits?.max_runs],
+      ["模型调用", mission.used_model_calls, mission.reserved_model_calls, mission.limits?.max_model_calls],
+      ["数据调用", mission.used_data_calls, mission.reserved_data_calls, mission.limits?.max_data_calls],
+    ]) {
+      const card = node("div", "mission-usage-card");
+      card.append(node("span", "", label), node("strong", "", `已用 ${number(used)} / ${number(max)}`), node("small", "", label === "运行轮数" ? `其中已领取 ${number(reserved)} 轮` : `预留 ${number(reserved)}`));
+      usage.append(card);
+    }
+    fragment.append(usage);
+    if (mission.reason) fragment.append(node("p", "run-state-note", `状态原因：${mission.reason}`));
+    const actions = node("div", "mission-actions");
+    for (const [action, label] of [
+      ...(mission.status === "active" ? [["pause", "暂停"], ["wake", state.missionWakeEvents.has(mission.mission_id) ? "重试唤醒" : "手动唤醒"]] : []),
+      ...(mission.status === "paused" ? [["resume", "恢复"]] : []),
+      ...(mission.status !== "completed" ? [["complete", "结束任务"]] : []),
+    ]) {
+      const button = node("button", `button button-small ${action === "complete" ? "button-delete" : "button-outline"}`, state.missionMutation?.id === mission.mission_id && state.missionMutation.action === action ? "正在提交…" : label);
+      button.type = "button";
+      button.disabled = Boolean(state.missionMutation);
+      button.addEventListener("click", () => mutateMission(action, button));
+      state.missionActionButtons.push(button);
+      actions.append(button);
+    }
+    fragment.append(actions, node("p", "detail-footnote", "暂停或结束会停止新周期领取，已领取周期会安全收尾。内核 completed 不等于目标已经外部独立验证。"));
+    const handoff = mission.handoff || {};
+    const handoffSection = node("section", "mission-handoff");
+    handoffSection.append(node("h3", "", `交接进展${handoff.truncated ? " · 已截断" : ""}`), node("p", "", handoff.summary || "尚无交接摘要。"));
+    if (safeArray(handoff.pending_items).length) {
+      const pending = node("ul", "unresolved-list");
+      for (const item of handoff.pending_items) pending.append(node("li", "", item));
+      handoffSection.append(pending);
+    }
+    if (handoff.previous_run_id) handoffSection.append(missionRunButton(handoff.previous_run_id, "查看上一轮运行 ↗"));
+    if (safeArray(handoff.artifact_refs).length) handoffSection.append(node("p", "mission-artifacts mono", `工件引用：${handoff.artifact_refs.join("、")}`));
+    handoffSection.append(node("p", "detail-footnote", "交接仅是下一轮的待核查线索，本轮仍需重新产生答案和证据。"));
+    fragment.append(handoffSection);
+    const triggers = node("section", "mission-triggers");
+    triggers.append(node("h3", "", "最近周期与运行"));
+    for (const trigger of safeArray(mission.triggers)) {
+      const row = node("div", "mission-trigger");
+      row.append(node("strong", "", `第 ${trigger.cycle ?? "—"} 轮 · ${TRIGGER_STATUS[trigger.status] || trigger.status}`), node("small", "", `${missionDate(trigger.created_at, "时间未记录")} · 运行 ${STATUS[trigger.run_status] || trigger.run_status || "待派发"}`));
+      if (trigger.stop_reason) row.append(node("p", "", `停止原因：${trigger.stop_reason}`));
+      if (trigger.run_id) row.append(missionRunButton(trigger.run_id), node("code", "", trigger.run_id));
+      triggers.append(row);
+    }
+    if (!safeArray(mission.triggers).length) triggers.append(node("p", "detail-footnote", "尚无周期记录。"));
+    fragment.append(triggers);
+    detail.replaceChildren(fragment);
+  }
+
+  function renderMissions() { renderMissionControls(); renderMissionList(); renderMissionDetail(); }
+
+  /** 在调用 API 之前验证整数与硬上限，绝不开放任意预算或服务端配置。 */
+  function missionInteger(id, label, max) {
+    const text = $(id).value.trim();
+    const value = Number(text);
+    if (!/^\d+$/.test(text) || !Number.isSafeInteger(value) || value < 1 || value > max) throw new Error(`${label}必须为 1 至 ${max} 的整数。`);
+    return value;
+  }
+
+  async function createMission(event) {
+    event.preventDefault();
+    if (state.missionCreating || state.info?.features?.missions !== true) return;
+    const profile = state.profiles.find((item) => item.profile_id === $("mission-profile").value);
+    if (!profile?.ready) { $("mission-form-note").textContent = "请先选择已就绪的执行配置。"; return; }
+    let payload;
+    try {
+      const title = $("mission-title").value.trim();
+      const question = $("mission-question").value.trim();
+      if (!title || title.length > 200 || !question || question.length > 2000) throw new Error("请填写任务标题（最多 200 字）和目标（最多 2000 字）。");
+      if (!["manual", "interval"].includes($("mission-schedule").value)) throw new Error("请选择手动或周期触发方式。");
+      payload = {
+        title, question, profile_id: profile.profile_id,
+        interval_seconds: $("mission-schedule").value === "interval" ? missionInteger("mission-interval", "周期秒数", 604800) : null,
+        start_immediately: true, stop_on_completed: $("mission-stop-on-completed").checked,
+        limits: Object.fromEntries(MISSION_LIMITS.map(([key, id, label, max]) => [key, missionInteger(id, label, max)])),
+      };
+    } catch (error) { $("mission-form-note").textContent = errorMessage(error); return; }
+    const userVersion = state.missionUserVersion;
+    state.missionCreating = true;
+    $("mission-form-note").textContent = "正在创建任务…";
+    renderMissionControls();
+    try {
+      const mission = await api("/api/missions", { method: "POST", body: JSON.stringify(payload) });
+      state.missionListVersion += 1;
+      state.missions = [mission, ...state.missions.filter((item) => item.mission_id !== mission.mission_id)];
+      if (userVersion === state.missionUserVersion && missionsVisible()) {
+        state.missionVersion += 1;
+        state.missionId = mission.mission_id;
+        state.mission = mission;
+        state.missionError = null;
+      }
+      $("mission-form-note").textContent = "任务已创建，首次周期已进入待办。";
+      announce("持续任务已创建。");
+      renderMissions();
+      if (state.missionId === mission.mission_id) await refreshMission(true);
+    } catch (error) { $("mission-form-note").textContent = errorMessage(error); }
+    finally { state.missionCreating = false; renderMissionControls(); scheduleMissionPoll(); }
+  }
+
+  /** 唤醒失败后保留事件身份：重试相同 event_id，避免未知 HTTP 结果重复入队。 */
+  async function mutateMission(action, button) {
+    const mission = state.mission;
+    if (!mission || state.missionMutation || !missionsVisible()) return;
+    const allowed = action === "pause" || action === "wake" ? mission.status === "active" : action === "resume" ? mission.status === "paused" : action === "complete" && mission.status !== "completed";
+    if (!allowed) return;
+    const id = mission.mission_id;
+    const epoch = state.missionEpoch;
+    const version = ++state.missionVersion;
+    // 动作改变了持久状态；任何动作前已开始的详情 GET 都只能被丢弃，不能复用或回写。
+    state.missionDetailRequests.delete(id);
+    state.missionMutation = { id, action };
+    button.disabled = true;
+    button.textContent = "正在提交…";
+    renderMissionControls();
+    renderMissionDetail();
+    let body;
+    if (action === "wake") {
+      if (!state.missionWakeEvents.has(id)) state.missionWakeEvents.set(id, window.crypto?.randomUUID?.() || `wake-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      body = JSON.stringify({ event_id: state.missionWakeEvents.get(id) });
+    }
+    try {
+      const result = await api(`/api/missions/${encodeURIComponent(id)}/${action}`, { method: "POST", ...(body ? { body } : {}) });
+      // 用户可在 POST 等待期间切换再选回；确认后的读取也不得复用这段期间捕获的旧快照。
+      state.missionDetailRequests.delete(id);
+      if (action === "wake") state.missionWakeEvents.delete(id);
+      else if (id === state.missionId && version === state.missionVersion && epoch === state.missionEpoch) state.mission = result;
+      announce(action === "wake" ? "唤醒事件已保存。" : action === "pause" ? "任务已暂停，已领取周期会安全收尾。" : action === "complete" ? "任务已结束，已领取周期会安全收尾。" : "任务已恢复。");
+      if (id === state.missionId && epoch === state.missionEpoch && missionsVisible()) await refreshMission(true);
+    } catch (error) { if (id === state.missionId && epoch === state.missionEpoch) showNotice(`${errorMessage(error)}${action === "wake" ? " 使用重试唤醒会复用同一事件，不会重复创建周期。" : ""}`, true); }
+    finally { state.missionMutation = null; renderMissionDetail(); renderMissionControls(); scheduleMissionPoll(); }
+  }
+
   async function initialize() {
     $("run-form").addEventListener("submit", createRun);
     $("question").addEventListener("input", updateQuestionCount);
@@ -1563,6 +1934,10 @@
     $("sources-profile").addEventListener("change", () => { state.sourcesProfileId = $("sources-profile").value; refreshSources(); });
     $("sources-search").addEventListener("input", renderSources);
     $("refresh-sources").addEventListener("click", refreshSources);
+    $("mission-form").addEventListener("submit", createMission);
+    $("mission-profile").addEventListener("change", () => { state.missionProfileId = $("mission-profile").value; renderMissionControls(); });
+    $("mission-schedule").addEventListener("change", renderMissionControls);
+    $("refresh-missions").addEventListener("click", () => refreshMissions());
     $("refresh-evaluations").addEventListener("click", refreshEvaluations);
     $("evaluation-select").addEventListener("change", () => selectEvaluation($("evaluation-select").value, true));
     $("choose-evaluation-file").addEventListener("click", () => $("evaluation-file").click());
@@ -1590,6 +1965,7 @@
     $("panel-details").replaceChildren(emptyState("展开一次真实调用", "提问后，选择时间线事件查看原始请求和响应。", "{ }"));
     renderSources();
     renderEvaluation();
+    renderMissions();
     const requestedView = window.location.hash.slice(1);
     setView(Object.hasOwn(VIEW_TITLES, requestedView) ? requestedView : "workbench");
     window.addEventListener("hashchange", () => setView(window.location.hash.slice(1)));
@@ -1598,6 +1974,7 @@
     if (results[0].status === "fulfilled") {
       state.info = results[0].value;
       renderInfo();
+      if (requestedView === "missions" && state.info?.features?.missions === true) setView("missions");
     } else {
       $("capabilities").replaceChildren(emptyState("暂时无法读取服务能力", "检查本地服务后刷新页面。"));
       showNotice(errorMessage(results[0].reason), true);
@@ -1606,9 +1983,12 @@
     try { previousRun = window.localStorage.getItem("agent-lab:last-run"); } catch { /* 此处仅保存可选偏好设置。 */ }
     if (!state.mutation && !state.selectedRunId && previousRun && state.runs.some((run) => run.run_id === previousRun)) await openRun(previousRun, false);
     schedulePoll();
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedulePoll(); });
-    window.addEventListener("pagehide", () => { state.stopped = true; state.pollGeneration += 1; window.clearTimeout(state.pollTimer); });
-    window.addEventListener("pageshow", () => { if (state.stopped) { state.stopped = false; schedulePoll(); } });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopMissionPolling();
+      else { schedulePoll(); scheduleMissionPoll(); }
+    });
+    window.addEventListener("pagehide", () => { state.stopped = true; state.pollGeneration += 1; window.clearTimeout(state.pollTimer); stopMissionPolling(); });
+    window.addEventListener("pageshow", () => { if (state.stopped) { state.stopped = false; schedulePoll(); scheduleMissionPoll(); } });
   }
 
   initialize().catch((error) => { showNotice(errorMessage(error), true); setConnection(false); });

@@ -18,13 +18,15 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import __version__
 from .. import models as m
 from ..config import ConfigError, load_config
 from ..evaluation.models import EvaluationImport, EvaluationMode
+from ..missions.models import MissionCreate, MissionError
+from ..missions.service import MissionService
 from .configuration import configured_profile
 from .reports import html_report
 from .service import RunService
@@ -49,6 +51,11 @@ _CAPABILITIES = [
         "status": "implemented",
         "description": "统一控制预算与超时；恢复复用已验证的响应，结果未知时拒绝重派发。",
     },
+    {
+        "name": "单机持续任务",
+        "status": "implemented",
+        "description": "持久保存手动/周期触发、累计预算与有界交接，重启按核心状态对账。",
+    },
 ]
 
 
@@ -58,6 +65,24 @@ class StartRun(m.Model):
     question: Annotated[str, Field(min_length=1, max_length=2000)]
     profile_id: Annotated[str, Field(min_length=1, max_length=100)] | None = None
     mode: m.Mode = "full_agent"
+
+
+class WakeMission(m.Model):
+    """唤醒只接收调用者稳定事件身份，不能覆盖运行参数或凭据。"""
+
+    event_id: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("event_id")
+    @classmethod
+    def valid_event(cls, value):
+        """拒绝空白和非法Unicode，保证去重身份可无损持久化。"""
+        if not value.strip():
+            raise ValueError("event_id must not be blank")
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("event_id must be valid UTF-8") from None
+        return value
 
 
 def create_app(
@@ -84,6 +109,7 @@ def create_app(
         profiles=profiles,
         enable_evaluations=enable_evaluations,
     )
+    missions = MissionService(service)
 
     def require_mode(mode):
         # 创建与恢复采用相同的服务端策略，浏览器无法通过自造请求切换实验行为。
@@ -99,14 +125,23 @@ def create_app(
     async def lifespan(app):
         try:
             await service.start()
+            if "full_agent" in modes:
+                await missions.start()
+            else:
+                # 历史仍可读取/暂停；禁用完整模式时不能后台绕过HTTP策略派发。
+                await missions.store.start()
             yield
         finally:
-            await service.close()
+            try:
+                await missions.close()
+            finally:
+                await service.close()
 
     app = FastAPI(
         title="Agent 项目工作台", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.state.run_service = service
+    app.state.mission_service = missions
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"]
     )
@@ -158,6 +193,12 @@ def create_app(
             {"detail": {"code": error.code, "message": error.message}}, status_code=error.status
         )
 
+    @app.exception_handler(MissionError)
+    async def mission_error(request, error):
+        return JSONResponse(
+            {"detail": {"code": error.code, "message": error.message}}, status_code=error.status
+        )
+
     @app.exception_handler(RequestValidationError)
     async def bad_request(request, error):
         # Pydantic 错误输入可能包含调用方文本。固定响应可避免将这些文本
@@ -181,8 +222,54 @@ def create_app(
             "profiles": entries,
             "capabilities": _CAPABILITIES,
             "enabled_modes": list(modes),
-            "features": {"evaluations": enable_evaluations},
+            "features": {"evaluations": enable_evaluations, "missions": "full_agent" in modes},
         }
+
+    async def mission_body(request, model):
+        """在JSON解码之前限制流式字节数，错误响应不包含原始目标文本。"""
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 32_768:
+                raise WebError("request_too_large", "持续任务请求不能超过 32 KiB。", 413)
+            body.extend(chunk)
+        try:
+            return model.model_validate_json(bytes(body))
+        except ValidationError:
+            raise WebError(
+                "invalid_mission", "持续任务格式不正确，请检查字段与限制范围。", 422
+            ) from None
+
+    @app.get("/api/missions")
+    async def missions_list():
+        return {"missions": await missions.listing(), "scheduler": missions.health()}
+
+    @app.post("/api/missions", status_code=201)
+    async def mission_create(request: Request):
+        require_mode("full_agent")
+        return await missions.create(await mission_body(request, MissionCreate))
+
+    @app.get("/api/missions/{mission_id}")
+    async def mission_detail(mission_id: str):
+        return await missions.view(mission_id)
+
+    @app.post("/api/missions/{mission_id}/pause")
+    async def mission_pause(mission_id: str):
+        return await missions.pause(mission_id)
+
+    @app.post("/api/missions/{mission_id}/resume")
+    async def mission_resume(mission_id: str):
+        require_mode("full_agent")
+        return await missions.resume(mission_id)
+
+    @app.post("/api/missions/{mission_id}/complete")
+    async def mission_complete(mission_id: str):
+        return await missions.complete(mission_id)
+
+    @app.post("/api/missions/{mission_id}/wake", status_code=202)
+    async def mission_wake(mission_id: str, request: Request):
+        require_mode("full_agent")
+        payload = await mission_body(request, WakeMission)
+        return await missions.wake(mission_id, payload.event_id)
 
     @app.get("/api/profiles")
     async def profiles_list():
@@ -287,7 +374,7 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     async def cancel(run_id: str):
-        return await service.cancel(run_id)
+        return await missions.cancel_run(run_id)
 
     @app.get("/api/runs/{run_id}/artifacts/{attempt_id}/{ref}")
     async def artifact(run_id: str, attempt_id: str, ref: str):

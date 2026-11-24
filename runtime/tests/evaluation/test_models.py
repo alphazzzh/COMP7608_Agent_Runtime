@@ -51,3 +51,32 @@ def test_report_baseline_does_not_become_a_production_run_mode():
     assert schema.EvaluationRow(mode="fixed_retrieval", task_count=1).mode == "fixed_retrieval"
     with pytest.raises(ValidationError):
         RunRequest(task_id="task", question="Question", mode="fixed_retrieval")
+
+
+def test_metric_coverage_counts_must_sum_to_task_count():
+    """指标覆盖率三项计数之和必须与该模式声明的 task_count 一致。"""
+    schema = importlib.import_module("lake_agent.evaluation.models")
+    valid = schema.EvaluationRow(
+        mode="full_agent",
+        task_count=2,
+        metric_coverage={
+            "numerical_accuracy": {
+                "applicable_count": 1,
+                "not_applicable_count": 1,
+                "unknown_count": 0,
+            }
+        },
+    )
+    assert valid.metric_coverage["numerical_accuracy"].applicable_count == 1
+    with pytest.raises(ValidationError):
+        schema.EvaluationRow(
+            mode="full_agent",
+            task_count=1,
+            metric_coverage={
+                "numerical_accuracy": {
+                    "applicable_count": 999,
+                    "not_applicable_count": 0,
+                    "unknown_count": 0,
+                }
+            },
+        )

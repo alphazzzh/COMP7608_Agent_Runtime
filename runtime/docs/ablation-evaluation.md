@@ -16,7 +16,7 @@
 
 正式工作台默认关闭评估导入，不初始化报告仓库或创建评估目录；只有可信测试宿主显式传入 `enable_evaluations=true` 后才提供该能力。报告导入与三组实际执行是不同入口，工作台只展示已有测量结果。
 
-Top-k 等于共享 `RunConfig.candidate_top_k`。具体工具与参数由宿主 `step_builder(candidate, tool_specs, question, index) -> AgentToolStep` 显式映射；生产核心不要求工具叫 extract。固定组候选在有界上下文中不完整时会明确停止，避免悄悄减少 Top-k。没有候选时允许单次空证据回答，仍不得伪造引用。
+Top-k 等于共享 `RunConfig.candidate_top_k`。具体工具与参数由宿主 `step_builder(candidate, tool_specs, question, index) -> AgentToolStep` 显式映射；生产核心不要求工具叫 extract。固定组候选在有界上下文中不完整时会明确停止，避免悄悄减少 Top-k。没有候选时允许单次空证据回答；该回答被拒后也不重新检索或生成，样本照常计入分母。
 
 ## 公平性与核验门禁
 
@@ -42,7 +42,7 @@ Top-k 等于共享 `RunConfig.candidate_top_k`。具体工具与参数由宿主 
 ]
 ```
 
-缺少某种标注时省略字段或设 null；没有相关源标注与明确的空集合不同。标签、数值容差和相关源在执行结束后才评分，不进入模型、内容模块或工具输入。只有问题与任务标识进入运行请求。
+缺少某种标注时省略字段或设 null；没有相关源标注与明确的空集合不同。`numeric_tolerance` 省略时为 0。数值标注可用 JSON 数字或精确数字字符串；当十进制小数无法无损导出为原有浮点格式时，详情留存其精确字符串。标签、数值容差和相关源在执行结束后才评分，不进入模型、内容模块或工具输入。只有问题与任务标识进入运行请求。
 
 在运行真实 LakeQA 对照前，先在 runtime 源码目录把原始题单转换为一份冻结 JSON。转换只读取题单，用 `nodes` 中的来源作文件级对照标签，并保留数值答案。检查这些 ID 与内置数据端口在选定 `base_dir` 下报告的相对路径一致。
 
@@ -73,22 +73,24 @@ Python 调用可传入 `ports_factory`、`step_builder`、`trace_factory` 和可
 | 指标 | 当前计算口径 |
 |---|---|
 | accuracy | 对保留答案文本做 NFKC、casefold 和空白归一化后，与任一标准答案完全匹配；无答案计 0 |
-| numerical_accuracy | 优先比较数值型 structured_result，否则答案全文必须是一个数；按标注的绝对容差比较，不从长解释中猜目标数字 |
+| numerical_accuracy | 优先比较数值型 structured_result，否则答案全文必须是一个数；按精确十进制比较绝对误差，避免相邻大整数被浮点舍入为同一个数 |
 | structured_accuracy | 优先使用 structured_result，否则解析答案全文 JSON；规范 JSON 相等、键顺序无关，布尔值与数字不同，数值类型须一致 |
-| retrieval_precision/recall/F1 | 去重的成功工具访问来源集合，对比相关文件标注；搜索候选集合另外导出，不混作实际访问结果 |
+| retrieval_precision/recall/F1 | 去重的控制器接纳工具来源集合，对比相关文件标注；搜索候选集合与所有已派发访问另行导出，不混作成功检索结果 |
 | grounding | 去重的引用文件中属于相关源标注的比例；仅是文件相关性代理，不能证明每项事实被证据支持；无引用或无标注为 null |
 | completion_rate | `status=completed` 的样本比例，与答案准确率分别计算；非 completed 但保留正确答案仍可有 accuracy=1 |
-| valid_tool_call_rate | 合法返回 ok ToolResult 的尝试数 / 已审计工具调用意图数；并不声称这些调用对任务有用 |
+| valid_tool_call_rate | 控制器接纳的 ok ToolResult 尝试数 / 已审计工具调用意图数；来源或证据校验拒绝的结果不计入，也不声称其他调用对任务有用 |
 | unnecessary_tool_call_rate | 独立判定为不必要的工具尝试 / 所有工具意图；缺少任一必要判定为 null，不把 inspect 或失败自动当作无用 |
-| tool_calls_mean/data_calls_mean | 每个样本的工具物理调用数；后者加上目录物理调用数，重试也计入 |
+| tool_calls_mean/data_calls_mean | 每个样本的工具预算账本计数；后者加上目录计数，含重试和已保留但未派发的调用额度 |
 | retry_recovery_rate | 发生额外尝试且后续获得 ok 结果的逻辑操作 / 发生额外尝试的逻辑操作；没有重试时为 null |
 | latency_ms_mean | 控制器运行耗时均值；包含其审计写入，不包含工厂创建/关闭时间 |
 | provider_requests_total | 各样本保守记账的模型请求数；本地固定策略不计模型请求，回答/核验正常计费 |
 | input/output_tokens_total、token_total | 实际上报用量合计；任一样本对应值未知则总量为 null |
 | cost_usd | 仅合计已测得且统一为 USD 的模型费用；缺失、混币种或非 USD 为 null |
-| external_data_bytes_total/external_data_cost_usd | 当前数据处理模块契约没有可信计量字段，运行器保持 null；数据调用次数不能替代真实流量/费用 |
+| external_data_bytes_total/external_data_cost_usd | 按实际目录与工具尝试合计独立测得的外部流量和美元费用；失败及重试按各自 `call_id` 计。任一必要测量缺失时该项为 null |
 
-质量指标按所有任务×重复的宏平均，某指标任一样本缺少必要标注时整组为 null，避免只选择可评分任务。调用比率采用总计数作分子/分母。空调用集合的调用比率、没有重试的恢复率为 null。相关源明确为空时 recall 在未访问来源时为 1，否则为 0；precision 在访问集合为空时为 0，F1 按二者计算。
+如需记账，Python 宿主传入 `data_usage_provider(data_port, run_id)`，或在 CLI 添加 `--data-usage-provider evaluation_adapter:read_usage`。函数在每个样本运行结束后、端口关闭前读取已收集的本地计量；原 DataPort 的请求、响应不增加字段。返回 `{"call-id": {"bytes_transferred": 123, "cost_usd": 0.01}}`，分别提供非负整数字节与实际 USD 费用。宿主负责对三组采用同一传输量测量边界，并从实际计费记录取得费用。按 `call_id` 记录所有本轮目录与工具尝试，包括失败和重试。未测到的字段用 `null` 或留空；只有确认未产生流量或费用时才写 `0`。未提供用量读取器的运行保持原来的 null，不能拿调用次数、正文长度或价格猜测替代实测。详情的 `data_attempt_usage` 可与运行审计核对；已明确未派发的意图不纳入计量。
+
+质量指标仅对明确适用的任务×重复样本取宏平均（排除在清单中通过 `not_applicable_metrics` 显式标记为不适用的任务，并在 `metric_coverage` 中分别导出 `applicable_count`、`not_applicable_count` 与 `unknown_count`）；若任一样本该指标的适用性未知（既无标注也未标明不适用）或适用样本数为 0，则整组指标置为 `null`，避免只选择可评分任务。调用比率采用总计数作分子/分母。空调用集合的调用比率、没有重试的恢复率为 null。相关源明确为空时 recall 在未访问来源时为 1，否则为 0；precision 在访问集合为空时为 0，F1 按二者计算。
 
 `details.variability` 保存耗时、工具调用、accuracy、F1、请求数和输入/输出 Token 在全部任务×重复样本上的均值、总体标准差、样本数和已知数；这不是逐任务重复实验的标准误或置信区间。原始逐任务结果保留，可按研究设计进一步分组计算。
 
@@ -99,3 +101,33 @@ uv run --extra dev --extra web --frozen pytest -q tests/evaluation tests/engine 
 ```
 
 该目录级命令包含消融评估、动作门禁和工作台报告边界，具体测试文件见[测试导航](../tests/README.md)。验证使用 MockTransport、本地端口和临时 JSONL/SQLite，不请求真实 API、不启动监听服务。它覆盖三组执行路径、门禁、统计与报告边界，不是 LakeQA 或真实模型效果报告。完成真实标注与模块接入后，再按冻结清单测量 Proposal 的实际表现。
+
+
+## LakeQA 批量运行、断点续跑与失败摘要
+
+正式 runner 仍放在评测宿主 `tests/ablation_runtime.py`，不会进入生产 wheel。`--manifest` 可以是当前评测 JSON 数组、单条 JSON 任务，或包含 `task_*.json` 的 LakeQA mini 目录；任务字段兼容 `task_id`/`question_id`/`id`、`question`/`query`、`expected_answers`/`answer`、`relevant_source_ids`/`relevant_sources`/`datasets_used`，并记录 `hop`/`hop_id` 或 `reasoning_hops` 的深度。冲突别名会在任何端口创建前拒绝。
+
+每完成一个 `mode × repeat × task`，runner 会刷盘 `samples.jsonl` 并原子更新 `checkpoint.json`。中断后使用相同的 manifest、配置、数据集标识、任务集标识、重复次数和可信 step builder 执行 `--resume`；身份不一致会拒绝恢复，已有样本不会再次调用数据、内容或规划器。完成后输出 `report.json`、`details.json`、`failures.json` 和完整 `samples.jsonl`。失败摘要按 `missed_sources`、`tool_errors`、`evidence_conflicts`、`unsupported_answers` 与 `other` 聚合；它是轨迹归类，不是答案质量的替代指标。
+
+示例：
+
+```bash
+uv run --extra web --frozen python -m tests.ablation_runtime \
+  --config config.toml \
+  --manifest /absolute/path/to/frozen-manifest.json \
+  --step-builder tests.support.lakeqa:build_step \
+  --dataset-id lakeqa \
+  --task-set-id lakeqa-mini-frozen-2026-11 \
+  --output-dir /absolute/path/to/output/lakeqa-run \
+  --repeats 3
+
+# 进程中断后继续
+uv run --extra web --frozen python -m tests.ablation_runtime \
+  --config config.toml \
+  --manifest /absolute/path/to/frozen-manifest.json \
+  --step-builder tests.support.lakeqa:build_step \
+  --dataset-id lakeqa \
+  --task-set-id lakeqa-mini-frozen-2026-11 \
+  --output-dir /absolute/path/to/output/lakeqa-run \
+  --repeats 3 --resume
+```

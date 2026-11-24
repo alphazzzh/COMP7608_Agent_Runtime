@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import random
 from collections.abc import Callable
@@ -20,8 +21,9 @@ from pydantic import BaseModel, ValidationError
 from . import models as m
 from .engine.content_feedback import feedback_protocol, reference_error
 from .engine.context import read_json_page
-from .engine.errors import FATAL_TOOL_CODES as _FATAL_TOOL_CODES
+from .engine.errors import ActionValidationError
 from .engine.errors import RunStopped as _Stop
+from .engine.execution import await_adapter_response
 from .engine.tool_runtime import ToolExecutionMixin
 from .engine.verification_state import VerificationReceipt, verification_fingerprint
 from .ports import AgentPlannerPort, ContentPort, DataPort, TraceSink
@@ -34,6 +36,8 @@ from .validation import (
 
 if TYPE_CHECKING:
     from .state import StateStore
+
+_LOG = logging.getLogger(__name__)
 
 
 def _id(prefix: str) -> str:
@@ -69,6 +73,11 @@ class _Controller(ToolExecutionMixin):
         self.active_call: m.JsonObject | None = None
         self.usage = {"input_tokens": 0, "output_tokens": 0, "cost": None, "currency": None}
         self.usage_unknown = False
+        self.external_data_bytes = 0
+        self.external_data_cost = 0.0
+        self.external_data_bytes_known = True
+        self.external_data_cost_known = True
+        self.evidence_bytes = 0
         self.trace_open = False
         self.trace_broken = False
         self.answer = None
@@ -79,6 +88,8 @@ class _Controller(ToolExecutionMixin):
         self.failure: m.RunFailure | None = None
         self.sources = {}
         self.evidence = []
+        self.searched_sources = set()
+        self.dispatched_sources = set()
         self.visited = set()
         self.step_ids = set()
         self.subtasks = []
@@ -97,16 +108,6 @@ class _Controller(ToolExecutionMixin):
     def _id(self, prefix):
         """仅在启用持久化执行时使用单次运行内稳定的标识符序列。"""
         return self.recovery.identifier(prefix) if self.recovery is not None else _id(prefix)
-
-    async def _invoke_port(self, phase, method, request, response_type):
-        """在适配器实现之外完成持久化调用准入。"""
-        if self.recovery is not None:
-            return await self.recovery.invoke(phase, method, request, response_type)
-        return await method(request)
-
-    async def _invoke_tool_port(self, request):
-        """由隔离工作任务在同批其他任务结算前保存每个已知响应。"""
-        return await self._invoke_port("tool", self.data.invoke, request, m.ToolResult)
 
     async def _observe(self, request, response, artifact_ref):
         """在完整审计工件提交后，为有效工具响应建立索引。
@@ -238,6 +239,9 @@ class _Controller(ToolExecutionMixin):
             if usage.provider_requests and usage.currency is None:
                 self.usage["cost"] = None
                 self.usage_unknown = True
+            elif not usage.provider_requests and usage.cost == 0 and usage.currency is None:
+                # 本地零费用调用未声明币种时，不应覆盖已累计的有效币种和费用。
+                pass
             elif self.usage["currency"] not in (None, usage.currency):
                 self.usage["cost"] = None
                 self.usage_unknown = True
@@ -247,6 +251,60 @@ class _Controller(ToolExecutionMixin):
         elif usage.provider_requests:
             self.usage_unknown = True
             self.usage["cost"] = None
+
+    def _record_external_usage(self, response=None):
+        """累计适配器实测的物理访问量；缺失值保持未知，不按正文大小猜测。"""
+        byte_count = getattr(response, "external_bytes_read", None)
+        if byte_count is None:
+            self.external_data_bytes_known = False
+        else:
+            self.external_data_bytes += byte_count
+        cost = getattr(response, "external_cost_usd", None)
+        if cost is None:
+            self.external_data_cost_known = False
+        else:
+            self.external_data_cost += cost
+
+    def _check_external_data_budget(self):
+        maximum = self.cfg.max_external_data_bytes
+        if maximum is None:
+            return
+        if not self.external_data_bytes_known:
+            raise _Stop("failed", "external_data_usage_unavailable")
+        if self.external_data_bytes > maximum:
+            raise _Stop("budget_exceeded", "external_data_budget")
+
+    def _check_token_budget(self, *, pre_call: bool):
+        for name, maximum in (
+            ("input_tokens", self.cfg.max_input_tokens),
+            ("output_tokens", self.cfg.max_output_tokens),
+        ):
+            if maximum is None:
+                continue
+            used = self.usage[name]
+            if used is None:
+                raise _Stop("failed", "token_usage_unavailable")
+            if (used >= maximum) if pre_call else (used > maximum):
+                raise _Stop("budget_exceeded", "token_budget")
+
+    def _settle_failed_usage(
+        self,
+        *,
+        provider: bool,
+        data_kind: str | None,
+        dispatched: bool,
+        settled: bool,
+        record_external: bool = True,
+    ):
+        if record_external and data_kind:
+            self._record_external_usage()
+        if provider and not settled:
+            if dispatched:
+                # 仅对已派发但未收到有效用量报告的尝试计数一次。
+                self.counts.model_calls += 1
+                self._add_usage(m.Usage(provider_requests=1))
+            else:
+                self.model_calls_reserved -= 1
 
     async def _call(
         self,
@@ -259,8 +317,8 @@ class _Controller(ToolExecutionMixin):
         provider=False,
         data_kind=None,
         idempotent=False,
-        step_id=None,
         content_errors=False,
+        recoverable_errors=(),
     ):
         """先持久化调用意图再派发，仅允许幂等数据操作重试。
 
@@ -270,12 +328,14 @@ class _Controller(ToolExecutionMixin):
         operation_id = self._id("op")
         for attempt in range(1, self.cfg.max_retries_per_data_operation + 2):
             self._time()
+            if provider:
+                self._check_token_budget(pre_call=True)
+            if data_kind:
+                self._check_external_data_budget()
             if data_kind and self.counts.catalog + self.counts.tools >= self.cfg.max_data_calls:
                 raise _Stop("budget_exceeded", "data_call_budget")
             if provider and self.model_calls_reserved >= self.cfg.max_model_calls:
                 raise _Stop("budget_exceeded", "model_call_budget")
-            if step_id and attempt == 1 and self.counts.steps >= self.cfg.max_plan_steps:
-                raise _Stop("budget_exceeded", "step_budget")
             call_deadline = min(
                 self.deadline, self.loop.time() + self.cfg.per_call_timeout_ms / 1000
             )
@@ -289,6 +349,8 @@ class _Controller(ToolExecutionMixin):
                 max_output_bytes=self.cfg.max_output_bytes_per_call,
             )
             if provider:
+                input_tokens = self.usage["input_tokens"]
+                output_tokens = self.usage["output_tokens"]
                 context.update(
                     model_id=self.cfg.model_id,
                     model_params=self.cfg.model_params,
@@ -296,7 +358,23 @@ class _Controller(ToolExecutionMixin):
                         self.cfg.prompt_versions,
                         "planner" if phase.startswith("planner") else "content",
                     ),
-                    token_budget=m.TokenBudget(),
+                    token_budget=m.TokenBudget(
+                        remaining_input_tokens=(
+                            max(0, self.cfg.max_input_tokens - input_tokens)
+                            if self.cfg.max_input_tokens is not None and input_tokens is not None
+                            else None
+                        ),
+                        remaining_output_tokens=(
+                            max(0, self.cfg.max_output_tokens - output_tokens)
+                            if self.cfg.max_output_tokens is not None and output_tokens is not None
+                            else None
+                        ),
+                        max_output_tokens_this_call=(
+                            max(0, self.cfg.max_output_tokens - output_tokens)
+                            if self.cfg.max_output_tokens is not None and output_tokens is not None
+                            else None
+                        ),
+                    ),
                 )
             # Pydantic 会保留已经实例化的嵌套模型。
             # 每个端口请求都要与原对象分离，防止规划器或内容适配器修改
@@ -315,58 +393,48 @@ class _Controller(ToolExecutionMixin):
                     }
                 )
             request_ref = await self._artifact(req)
-            meta = dict(
-                operation_id=operation_id, call_id=req.call_id, attempt=attempt, step_id=step_id
-            )
+            meta = dict(operation_id=operation_id, call_id=req.call_id, attempt=attempt)
             # 等待开始事件提交前先预留预算。调用方取消若与线程中的
             # 追加操作发生竞态，提交结果可能未知；此时保留实际调用和模型
             # 配额，并在 run.cancelled 中暴露 ID。
             # 普通写入失败则回退预留，因为之后不可能发起端口调用。
             if data_kind:
                 setattr(self.counts, data_kind, getattr(self.counts, data_kind) + 1)
-                if step_id and attempt == 1:
-                    self.counts.steps += 1
             if provider:
                 self.model_calls_reserved += 1
             self.pending_call = {"phase": phase, **meta}
             try:
                 await self._event(f"{phase}.call.started", data_ref=request_ref, **meta)
-            except asyncio.CancelledError:
-                if step_id and attempt == 1:
-                    self.counts.steps -= 1
-                raise
             except _Stop:
                 if data_kind:
                     setattr(self.counts, data_kind, getattr(self.counts, data_kind) - 1)
-                    if step_id and attempt == 1:
-                        self.counts.steps -= 1
                 if provider:
                     self.model_calls_reserved -= 1
                 self.pending_call = None
                 raise
             self.pending_call = None
+            # 已知历史回复的重放不受新的单次派发窗口限制，仅受原运行总期限约束。
+            replayable = self.recovery is not None and self.recovery.has_cached_response(
+                req.call_id
+            )
+            if self.loop.time() >= self.deadline:
+                await self._event(
+                    f"{phase}.call.failed",
+                    status="timeout",
+                    terminal=True,
+                    duration_ms=0,
+                    error=m.ErrorInfo(
+                        code="time_budget",
+                        message="Run deadline expired before dispatch.",
+                        retryable=True,
+                    ),
+                    detail={"code": "time_budget", "outcome": "not_dispatched"},
+                    **meta,
+                )
+                raise _Stop("timeout", "time_budget")
             # 缓慢的追踪写入可能耗尽派发窗口。已持久化的 call.started
             # 尝试仍占用预算，但不得再进入端口。
-            if self.loop.time() >= call_deadline:
-                if step_id and attempt == 1:
-                    # call.started 已提交后虽预留了实际尝试，
-                    # 但逻辑调用尚未开始。
-                    self.counts.steps -= 1
-                if self.loop.time() >= self.deadline:
-                    await self._event(
-                        f"{phase}.call.failed",
-                        status="timeout",
-                        terminal=True,
-                        duration_ms=0,
-                        error=m.ErrorInfo(
-                            code="time_budget",
-                            message="Run deadline expired before dispatch.",
-                            retryable=True,
-                        ),
-                        detail={"code": "time_budget", "outcome": "not_dispatched"},
-                        **meta,
-                    )
-                    raise _Stop("timeout", "time_budget")
+            if self.loop.time() >= call_deadline and not replayable:
                 await self._event(
                     f"{phase}.call.failed",
                     status="timeout",
@@ -383,8 +451,31 @@ class _Controller(ToolExecutionMixin):
             begun = self.loop.time()
             error = None
             response = None
+            dispatched = False
             provider_usage_settled = False
-            cancelled = False
+            keep_active = False
+
+            def mark_dispatched():
+                nonlocal dispatched
+                dispatched = True
+
+            def accept_response(value):
+                """用量和已返回状态在可能中断的持久化之前标记。"""
+                nonlocal response, provider_usage_settled
+                response = value
+                self.active_call["outcome"] = "returned"
+                if data_kind:
+                    self._record_external_usage(response)
+                if not hasattr(response, "usage"):
+                    return
+                usage = response.usage
+                self._add_usage(usage)
+                self.counts.model_calls += usage.provider_requests
+                if provider:
+                    # 零请求的有效回复释放预留；实际请求保留预留。
+                    self.model_calls_reserved -= 1 - usage.provider_requests
+                    provider_usage_settled = True
+
             try:
                 if not data_kind:
                     count_field = "planner" if phase.startswith("planner") else "content"
@@ -395,43 +486,30 @@ class _Controller(ToolExecutionMixin):
                 # 调用方取消导致最终结果无法确定时，
                 # 须保留后者的身份。
                 self.active_call = {"phase": phase, **meta, "outcome": "unknown"}
-                owner = asyncio.current_task()
-                cancelled_before = owner.cancelling() if owner is not None else 0
-                try:
-                    async with asyncio.timeout_at(call_deadline):
-                        raw = await self._invoke_port(phase, method, req, response_type)
-                finally:
-                    # timeout_at 退出时会移除自身的取消请求。
-                    # 新增的待处理请求属于调用方，包括适配器吞掉取消后
-                    # 返回响应或抛出异常的情况。
-                    if owner is not None and owner.cancelling() > cancelled_before:
-                        raise asyncio.CancelledError
-                # timeout_at 依赖协作：适配器可能吞掉其注入的取消，
-                # 但迟到响应仍不得被接受。
-                if self.loop.time() >= call_deadline:
-                    raise TimeoutError
-                # 即使已是模型实例也要重新验证：model_copy(update=...) 会绕过 Pydantic。
-                raw = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else raw
-                if len(canonical_json(raw)) > self.cfg.max_output_bytes_per_call:
-                    raise ValueError("response exceeds max_output_bytes")
-                response = response_type.model_validate(raw)
-                if response.call_id != req.call_id:
-                    raise ValueError("response call_id mismatch")
-                self.active_call["outcome"] = "returned"
-                if hasattr(response, "usage"):
-                    if provider:
-                        self.counts.model_calls += response.usage.provider_requests
-                        # 有效的零请求报告证明此配额未用于提供方请求。
-                        # 已完成的实际调用继续占用预留，
-                        # 未使用的预留则释放。
-                        self.model_calls_reserved -= 1 - response.usage.provider_requests
-                        provider_usage_settled = True
-                    self._add_usage(response.usage)
-                    if not provider and response.usage.provider_requests != 0:
-                        # 即使因违反本地端口契约而失败，也要在用量核算中
-                        # 保留已声明的实际派发。
-                        self.counts.model_calls += response.usage.provider_requests
-                        raise ValueError("local method must not make provider requests")
+                if self.recovery is None:
+                    accept_response(
+                        await await_adapter_response(
+                            method,
+                            req,
+                            response_type,
+                            deadline=call_deadline,
+                            max_output_bytes=req.max_output_bytes,
+                            on_dispatch=mark_dispatched,
+                        )
+                    )
+                else:
+                    await self.recovery.invoke(
+                        phase,
+                        method,
+                        req,
+                        response_type,
+                        deadline=call_deadline,
+                        on_dispatch=mark_dispatched,
+                        on_response=accept_response,
+                    )
+                self._time()  # 完成已知结果写入后，仍须遵守运行总期限。
+                if not provider and hasattr(response, "usage") and response.usage.provider_requests:
+                    raise ValueError("local method must not make provider requests")
                 ref = await self._artifact(response)
                 if response.status == "error":
                     self.failure = m.RunFailure(
@@ -446,9 +524,11 @@ class _Controller(ToolExecutionMixin):
                     usage=getattr(response, "usage", None),
                     **meta,
                 )
-                if isinstance(response, m.ToolResult):
-                    await self._observe(req, response, ref)
+                if data_kind:
+                    self._check_external_data_budget()
                 if response.status == "ok":
+                    if provider:
+                        self._check_token_budget(pre_call=False)
                     if (
                         not content_errors
                         and self.failure is not None
@@ -458,20 +538,26 @@ class _Controller(ToolExecutionMixin):
                     return response
                 error = response.error
             except asyncio.CancelledError:
-                cancelled = True
-                if provider and not provider_usage_settled:
-                    # 控制器未收到有效用量报告；对预留尝试计数一次，
-                    # 与超时和错误的核算方式一致。
-                    # 已返回的本地响应仍须保持为已知零用量。
-                    self.counts.model_calls += 1
-                    self._add_usage(m.Usage(provider_requests=1))
+                keep_active = True
+                self._settle_failed_usage(
+                    provider=provider,
+                    data_kind=data_kind,
+                    dispatched=dispatched,
+                    settled=provider_usage_settled,
+                    record_external=False,
+                )
                 raise
-            except _Stop:
+            except _Stop as stop:
+                # 知道回复但总期限已到，保留尚未落入调用审计的返回状态。
+                keep_active = response is not None and stop.reason == "time_budget"
                 raise
             except TimeoutError as exc:
-                if provider:
-                    self.counts.model_calls += 1
-                    self._add_usage(m.Usage(provider_requests=1))
+                self._settle_failed_usage(
+                    provider=provider,
+                    data_kind=data_kind,
+                    dispatched=dispatched,
+                    settled=provider_usage_settled,
+                )
                 error = m.ErrorInfo(
                     code="timeout", message="Cooperative call deadline exceeded", retryable=True
                 )
@@ -485,16 +571,19 @@ class _Controller(ToolExecutionMixin):
                     error=error,
                     detail={
                         "code": "time_budget" if time_budget else "timeout",
-                        "outcome": "unknown",
+                        "outcome": "unknown" if dispatched else "not_dispatched",
                     },
                     **meta,
                 )
                 if time_budget:
                     raise _Stop("timeout", "time_budget") from exc
             except (ValidationError, ValueError, TypeError) as exc:
-                if provider:
-                    self.counts.model_calls += 1
-                    self._add_usage(m.Usage(provider_requests=1))
+                self._settle_failed_usage(
+                    provider=provider,
+                    data_kind=data_kind,
+                    dispatched=dispatched,
+                    settled=provider_usage_settled,
+                )
                 error = m.ErrorInfo(
                     code="invalid_response",
                     message="Adapter returned an invalid response.",
@@ -511,9 +600,12 @@ class _Controller(ToolExecutionMixin):
                 )
                 raise _Stop("failed", "invalid_module_response") from exc
             except Exception as exc:
-                if provider:
-                    self.counts.model_calls += 1
-                    self._add_usage(m.Usage(provider_requests=1))
+                self._settle_failed_usage(
+                    provider=provider,
+                    data_kind=data_kind,
+                    dispatched=dispatched,
+                    settled=provider_usage_settled,
+                )
                 error = m.ErrorInfo(
                     code="adapter_error", message="Adapter call failed.", retryable=False
                 )
@@ -529,7 +621,7 @@ class _Controller(ToolExecutionMixin):
                 # 异常没有可靠的可重试契约，绝不盲目重放工具调用。
                 raise _Stop("failed", "tool_error" if data_kind else "module_error") from exc
             finally:
-                if not cancelled:
+                if not keep_active:
                     self.active_call = None
             # 模型输出修正是一轮新的自主决策，不是 HTTP 重试。只有显式支持反馈的
             # 内容端口和确定的输出校验错误可以进入该通路；超时/鉴权/契约错误仍停止。
@@ -540,6 +632,17 @@ class _Controller(ToolExecutionMixin):
                 and error.code
                 in {"invalid_model_citations", "invalid_model_sources", "invalid_model_output"}
             ):
+                if provider:
+                    self._check_token_budget(pre_call=False)
+                return response
+            if (
+                recoverable_errors
+                and isinstance(response, m.ModuleResult)
+                and response.status == "error"
+                and response.error.code in recoverable_errors
+            ):
+                if provider:
+                    self._check_token_budget(pre_call=False)
                 return response
             if not (
                 data_kind
@@ -547,14 +650,6 @@ class _Controller(ToolExecutionMixin):
                 and error.retryable
                 and attempt <= self.cfg.max_retries_per_data_operation
             ):
-                if (
-                    isinstance(response, m.ToolResult)
-                    and error.recoverable
-                    and error.code not in _FATAL_TOOL_CODES
-                ):
-                    # 重新规划是一次新的、受预算约束的决策。
-                    # 它不是传输重试，也不重放结果未知的副作用。
-                    return response
                 if error.code == "timeout":
                     raise _Stop("timeout", "call_timeout")
                 if error.code == "token_budget_exceeded":
@@ -626,17 +721,9 @@ class _Controller(ToolExecutionMixin):
             raise _Stop("failed", "catalog_snapshot_mismatch")
         self.handle = reply.data.handle
 
-    async def _search(self, subtask, focus=None, *, source_ids=None):
+    async def _search(self, subtask, query, *, source_ids=None):
         """检索当前子任务的候选来源，并验证数量、归属和过滤范围。"""
-        query = focus.query if focus else subtask.search_query
         subtask = subtask.model_copy(update={"search_query": query})
-        source_filter = (
-            source_ids
-            if source_ids is not None
-            else focus.source_ids
-            if focus and focus.source_ids
-            else None
-        )
         reply = await self._call(
             "content.search",
             self.content.search,
@@ -647,7 +734,7 @@ class _Controller(ToolExecutionMixin):
                 catalog_snapshot_id=self.snapshot,
                 catalog_handle=self.handle,
                 visited_source_ids=sorted(self.visited),
-                source_id_filter=source_filter,
+                source_id_filter=source_ids,
                 limit=self.cfg.candidate_top_k,
             ),
             m.ModuleResult[m.SearchResponse],
@@ -658,26 +745,17 @@ class _Controller(ToolExecutionMixin):
             len(ids) > self.cfg.candidate_top_k
             or len(set(ids)) != len(ids)
             or not set(ids) <= self.sources.keys()
-            or (source_filter is not None and not set(ids) <= set(source_filter))
+            or (source_ids is not None and not set(ids) <= set(source_ids))
         ):
             raise _Stop("failed", "invalid_module_response")
+        self.searched_sources.update(ids)
         return sorted(candidates, key=lambda item: (-item.score, item.source_id))
 
-    async def _execute_plan(self, plan, subtask, candidates, *, authorized_sources=None):
+    async def _execute_plan(self, plan, subtask):
         """完整验证计划和来源授权后，再登记步骤并派发工具工作。"""
         if len(plan.steps) > self.cfg.max_plan_steps - self.counts.steps:
             raise _Stop("budget_exceeded", "step_budget")
-        allowed = {c.source_id for c in candidates} | {e.source_id for e in self.evidence}
-        # inspect 可以建立有用的结构信息，而不返回证据。
-        # 检索适配器可能省略已访问来源，因此已接受观察记录的来源授权
-        # 须独立于下一次检索的候选列表保留。
-        allowed.update(source for item in self.observations for source in item["source_ids"])
-        if authorized_sources is not None:
-            # 自主决策可直接选择已冻结目录来源，不必先制造检索候选；
-            # 权限来自可信调度器，仍不能越过目录边界。
-            if not set(authorized_sources) <= self.sources.keys():
-                raise _Stop("failed", "invalid_plan")
-            allowed.update(authorized_sources)
+        allowed = self.sources.keys()
         try:
             steps = validate_dag(plan.steps, "step_id")
             ids = {step.step_id for step in steps}
@@ -692,7 +770,15 @@ class _Controller(ToolExecutionMixin):
                 if len(step.source_ids) != len(set(step.source_ids)):
                     raise ValueError("duplicate source IDs")
         except (ValueError, ValidationError) as exc:
-            raise _Stop("failed", "invalid_plan") from exc
+            message = str(exc)
+            code = (
+                "tool_schema_mismatch"
+                if "tool arguments" in message or "schema" in message
+                else "source_authorization_mismatch"
+                if "source authorization" in message or "source IDs" in message
+                else "invalid_plan"
+            )
+            raise ActionValidationError(code) from exc
         # 提交任何 ID 或执行任何步骤前，先验证整个计划。
         self.step_ids.update(ids)
         self.accepted_steps.update({step.step_id: step for step in steps})
@@ -743,30 +829,57 @@ class _Controller(ToolExecutionMixin):
             return {**fields, "feedback": feedback}
         return fields
 
-    def _verification_fingerprint(self):
+    def _verification_fingerprint(self, evidence=None):
         """以实际业务值计算身份，不以调用次数或工具观察的变化使核验失效。"""
         return verification_fingerprint(
             question=self.req.question,
             answer=self.answer,
-            evidence=self.evidence,
+            evidence=self.evidence if evidence is None else evidence,
             mode=self.req.mode,
             require_verification=self.cfg.require_verification,
         )
 
+    def _select_evidence(self, evidence_ids):
+        """只将本轮已接纳的证据交给内容端口，并拒绝重复或未知身份。"""
+        if evidence_ids is None:
+            return list(self.evidence)
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ActionValidationError("invalid_evidence_selection")
+        available = {item.evidence_id: item for item in self.evidence}
+        if not set(evidence_ids) <= available.keys():
+            raise ActionValidationError("invalid_evidence_selection")
+        return [available[evidence_id] for evidence_id in evidence_ids]
+
     def _verification_status(self):
-        """过期只表示不再适用，不能当成对当前答案的否定核验。"""
-        if self.verification_receipt is None:
+        """按收据记录的证据子集判断新鲜度，而不是隐式扩展到全部证据。"""
+        receipt = self.verification_receipt
+        if receipt is None:
             return "missing"
         if self.answer is None:
             return "stale"
+        receipt_ids = (
+            [item.evidence_id for item in self.evidence]
+            if receipt.evidence_ids is None
+            else list(receipt.evidence_ids)
+        )
+        covers_all = True if receipt.covers_all is None else receipt.covers_all
+        if covers_all and receipt_ids != [item.evidence_id for item in self.evidence]:
+            return "stale"
+        if self.cfg.require_verification and not covers_all:
+            return "stale"
+        try:
+            checked = self._select_evidence(receipt_ids)
+        except ActionValidationError:
+            return "stale"
         return (
             "current"
-            if self.verification_receipt.input_fingerprint == self._verification_fingerprint()
+            if receipt.input_fingerprint == self._verification_fingerprint(checked)
             else "stale"
         )
 
-    async def _compose(self, *, revision_instructions=None):
-        """生成后校验引用，未接纳的内容不覆盖上一次有效答案。"""
+    async def _compose(self, *, revision_instructions=None, evidence_ids=None):
+        """生成后校验所选引用，未接纳的内容不覆盖上一次有效答案。"""
+        evidence = self._select_evidence(evidence_ids)
         revision = None
         if self.answer is not None:
             receipt = self.verification_receipt
@@ -781,7 +894,7 @@ class _Controller(ToolExecutionMixin):
             dict(
                 question=self.req.question,
                 completed_subtasks=self.completed_subtasks,
-                evidence=self.evidence,
+                evidence=evidence,
                 revision=revision,
             ),
         )
@@ -800,7 +913,7 @@ class _Controller(ToolExecutionMixin):
             else reference_error(
                 "compose",
                 reply.data,
-                allowed_evidence_ids=[e.evidence_id for e in self.evidence],
+                allowed_evidence_ids=[e.evidence_id for e in evidence],
                 allowed_source_ids=list(self.sources),
             )
         )
@@ -815,16 +928,16 @@ class _Controller(ToolExecutionMixin):
         self.answer = reply.data
         return True
 
-    async def _verify(self):
-        """核验输出格式与引用身份；合法的不支持判定照常交模型决策。"""
-        # 在派发前捕获完整实际输入；_call会隔离给适配器的请求，避免其修改控制状态。
-        checked_fingerprint = self._verification_fingerprint()
+    async def _verify(self, *, evidence_ids=None, covers_all=None):
+        """核验所选证据，并记录是否覆盖核验调用当时的全部证据。"""
+        evidence = self._select_evidence(evidence_ids)
+        checked_fingerprint = self._verification_fingerprint(evidence)
         fields = self._feedback_fields(
             "verify",
             dict(
                 question=self.req.question,
                 answer=self.answer,
-                evidence=self.evidence,
+                evidence=evidence,
             ),
         )
         reply = await self._call(
@@ -842,7 +955,7 @@ class _Controller(ToolExecutionMixin):
             else reference_error(
                 "verify",
                 reply.data,
-                allowed_evidence_ids=[e.evidence_id for e in self.evidence],
+                allowed_evidence_ids=[e.evidence_id for e in evidence],
                 allowed_source_ids=list(self.sources),
             )
         )
@@ -854,6 +967,8 @@ class _Controller(ToolExecutionMixin):
             input_fingerprint=checked_fingerprint,
             result=reply.data,
             call_id=reply.call_id,
+            evidence_ids=tuple(item.evidence_id for item in evidence),
+            covers_all=covers_all,
         )
         return reply.data
 
@@ -911,6 +1026,7 @@ class _Controller(ToolExecutionMixin):
     async def execute(self):
         """执行一次控制器运行，统一处理终态审计、关闭和调用方取消。"""
         trace_ref = None
+        unexpected_error_type = None
         try:
             try:
                 # 在线程中创建目录时，取消可能发生于目录已预留之后。
@@ -929,6 +1045,8 @@ class _Controller(ToolExecutionMixin):
             resumed = self.recovery is not None and self.recovery.resuming
             await self._event("run.resumed" if resumed else "run.started", data_ref=ref)
             reason = await self._workflow()
+            # 接纳成功终态前复查总期限，避免最后一次进度保存超时后仍返回 completed。
+            self._time()
             status = "completed"
         except asyncio.CancelledError:
             # 屏蔽短暂清理期间的取消；即使再次取消，也保留原始取消，
@@ -939,7 +1057,13 @@ class _Controller(ToolExecutionMixin):
             status, reason = stop.status, stop.reason
         except TimeoutError:
             status, reason = "timeout", "time_budget"
-        except Exception:
+        except Exception as exc:
+            _LOG.error(
+                "Unexpected error during controller execution run_id=%s error_type=%s",
+                self.run_id,
+                type(exc).__name__,
+            )
+            unexpected_error_type = type(exc).__name__
             status, reason = "failed", "module_error"
         try:
             if self.trace_open:
@@ -951,6 +1075,11 @@ class _Controller(ToolExecutionMixin):
                             status=status,
                             detail={
                                 "stop_reason": reason,
+                                **(
+                                    {"error_type": unexpected_error_type}
+                                    if unexpected_error_type is not None
+                                    else {}
+                                ),
                                 **(
                                     {"failure": self.failure.model_dump(mode="json")}
                                     if self.failure is not None
@@ -978,6 +1107,24 @@ class _Controller(ToolExecutionMixin):
             status=status,
             stop_reason=reason,
             failure=self.failure if status != "completed" else None,
+            external_data_bytes_total=(
+                self.external_data_bytes if self.external_data_bytes_known else None
+            ),
+            external_data_cost_usd=(
+                self.external_data_cost if self.external_data_cost_known else None
+            ),
+            source_funnel=m.SourceFunnel(
+                searched_sources=sorted(self.searched_sources),
+                visited_sources=sorted(self.dispatched_sources),
+                evidence_sources=sorted({item.source_id for item in self.evidence}),
+                cited_sources=sorted(
+                    {
+                        item.source_id
+                        for item in self.evidence
+                        if self.answer is not None and item.evidence_id in self.answer.citations
+                    }
+                ),
+            ),
             answer=self.answer,
             usage=m.AggregateUsage(**self.usage, provider_requests=self.counts.model_calls),
             call_counts=self.counts,

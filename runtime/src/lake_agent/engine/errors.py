@@ -12,6 +12,14 @@ class RunStopped(Exception):
         super().__init__(reason)
 
 
+class ActionValidationError(ValueError):
+    """经过静态检查可安全反馈给规划器的动作校验错误。"""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
 # 可信适配器只能对已知可安全处理的失败请求修正输入。
 # 以下保留错误码即使标记为 recoverable，也不能获得纠错恢复权限。
 FATAL_TOOL_CODES = frozenset(

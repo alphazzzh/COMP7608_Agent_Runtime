@@ -232,6 +232,48 @@ async def test_pending_delete_is_hidden_and_completed_after_service_restart(
         assert not list((tmp_path / ".deletions").iterdir())
 
 
+async def test_view_refreshes_terminal_manifest_when_cleanup_finishes_mid_read(
+    tmp_path, monkeypatch
+):
+    """一次终态快照不能配上比它更新的任务停止状态。"""
+    app = make_app(tmp_path)
+    service = app.state.run_service
+    entered, release = asyncio.Event(), asyncio.Event()
+    save, read = service.repository.save, service.repository.view
+
+    async def hold_first_terminal_save(record):
+        await save(record)
+        if record.get("result") is not None and not release.is_set():
+            entered.set()
+            await release.wait()
+
+    async def finish_after_read(run_id):
+        snapshot = await read(run_id)
+        if not release.is_set():
+            assert snapshot["status"] == "completed"
+            job = service.tasks[run_id]
+            release.set()
+            await asyncio.wait_for(asyncio.shield(job), timeout=4)
+        return snapshot
+
+    monkeypatch.setattr(service.repository, "save", hold_first_terminal_save)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            run_id = await create_run(client)
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=4)
+                monkeypatch.setattr(service.repository, "view", finish_after_read)
+                detail = await client.get(f"/api/runs/{run_id}")
+                exported = await client.get(f"/api/runs/{run_id}/export")
+                assert detail.status_code == exported.status_code == 200
+                assert detail.json()["active"] is False
+                assert detail.json() == exported.json()
+            finally:
+                release.set()
+
+
 async def test_delete_cancellation_waits_for_cleanup_and_serializes_resume(tmp_path, monkeypatch):
     app = make_app(tmp_path)
     service = app.state.run_service

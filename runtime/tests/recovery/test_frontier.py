@@ -9,6 +9,7 @@ import asyncio
 import json
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,121 @@ class FailingToolResultTrace(JsonlTraceSink):
             self.failed = True
             raise OSError("controlled tool-result artifact failure")
         await super().put_artifact(ref, value)
+
+
+class GatedFinishStore(SqliteStateStore):
+    """在真实 SQLite 结算线程中暂停一个已返回的有效响应。"""
+
+    def __init__(self, path, phase):
+        super().__init__(path)
+        self.phase = phase
+        self.entered = asyncio.Event()
+        self.release_finish = threading.Event()
+        self.loop = asyncio.get_running_loop()
+
+    def _write_call(self, lease, call_id, value, finish):
+        if finish and value["phase"] == self.phase and not self.release_finish.is_set():
+            self.loop.call_soon_threadsafe(self.entered.set)
+            if not self.release_finish.wait(5):
+                raise AssertionError("SQLite finish was not released by the test")
+        super()._write_call(lease, call_id, value, finish)
+
+
+@pytest.mark.parametrize("phase", ["catalog", "tool"])
+@pytest.mark.parametrize("scenario", ["slow-finish", "caller-cancel", "run-deadline"])
+async def test_durable_response_and_trace_agree_when_sqlite_finish_waits(tmp_path, phase, scenario):
+    """慢写入不能触发重试；取消和总期限仍可在保全已知结果后停止。"""
+    run_id, traces = "recoverable-run", tmp_path / "traces"
+    store = GatedFinishStore(tmp_path / "state.db", phase)
+    data = RecordingData()
+    cancel = scenario == "caller-cancel"
+    run_deadline = scenario == "run-deadline"
+    work = asyncio.create_task(
+        run(
+            request(
+                per_call_timeout_ms=2000 if run_deadline else 300,
+                max_wall_time_ms=1000 if run_deadline else 120_000,
+                max_data_calls=6,
+            ),
+            data=data,
+            content=RecordingContent(),
+            planner=RecordingPlanner(),
+            trace=JsonlTraceSink(traces),
+            state_store=store,
+        )
+    )
+    try:
+        await asyncio.wait_for(store.entered.wait(), timeout=4)
+        if cancel:
+            work.cancel()
+        await asyncio.sleep(1.05 if run_deadline else 0.35)
+        assert not work.done()
+        store.release_finish.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(work, timeout=4)
+        else:
+            result = await asyncio.wait_for(work, timeout=4)
+            if run_deadline:
+                assert (result.status, result.stop_reason) == ("timeout", "time_budget")
+                assert len(data.tool_requests) == int(phase == "tool")
+                assert result.call_counts.content == (2 if phase == "tool" else 0)
+            else:
+                assert result.status == "completed"
+            assert result.call_counts.retries == 0
+        physical = data.catalog_requests if phase == "catalog" else data.tool_requests
+        assert len(physical) == 1
+        call_id = physical[0].call_id
+        lease = await store.acquire(run_id)
+        try:
+            records = (await store.load(lease)).calls
+            assert {key for key, row in records.items() if row["phase"] == phase} == {call_id}
+            assert records[call_id]["status"] == "completed"
+            assert records[call_id]["response"]["call_id"] == call_id
+        finally:
+            await store.release(lease)
+
+        events = trace_events(next(traces.rglob("events.jsonl")))
+        if cancel or run_deadline:
+            assert events[-1]["event_type"] == ("run.cancelled" if cancel else "run.stopped")
+            active = {
+                item["call_id"]: item["outcome"] for item in events[-1]["detail"]["active_calls"]
+            }
+            assert active.get(call_id) == "returned"
+        else:
+            assert any(
+                e["event_type"] == f"{phase}.call.completed" and e["call_id"] == call_id
+                for e in events
+            )
+        assert not any(
+            e["event_type"] == f"{phase}.call.failed" and e["call_id"] == call_id for e in events
+        )
+
+        fresh = RecordingData()
+        recovered = await resume(
+            run_id,
+            data=fresh,
+            content=RecordingContent(),
+            planner=RecordingPlanner(),
+            trace=JsonlTraceSink(traces),
+            state_store=store,
+        )
+        assert recovered.status == ("timeout" if run_deadline else "completed")
+        assert not (fresh.catalog_requests if phase == "catalog" else fresh.tool_requests)
+        if cancel:
+            replay = [e for path in traces.rglob("events.jsonl") for e in trace_events(path)]
+            assert any(
+                e["event_type"] == f"{phase}.call.completed"
+                and e["call_id"] == call_id
+                and e["detail"].get("replayed")
+                for e in replay
+            )
+    finally:
+        store.release_finish.set()
+        if not work.done():
+            work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+        await store.aclose()
 
 
 async def test_multiple_interruptions_rebind_each_fresh_content_instance(tmp_path):

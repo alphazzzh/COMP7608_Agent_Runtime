@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from lake_agent import models as m
 from lake_agent.models import RunConfig, RunRequest
 from lake_agent.runtime import run
 from lake_agent.trace import JsonlTraceSink
@@ -211,11 +212,45 @@ async def test_duplicate_run_never_overwrites_trace(tmp_path):
     assert await asyncio.to_thread(Path(first.trace_ref).read_text) == original
 
 
-async def test_token_cap_rejected_before_external_calls(tmp_path):
+async def test_token_caps_allow_locally_measured_zero_usage(tmp_path):
     result = await execute(tmp_path, request(max_input_tokens=1000))
-    assert result.status == "failed"
-    assert result.stop_reason == "unsupported_token_budget"
-    assert result.call_counts.catalog == 0
+    assert result.status == "completed"
+    assert result.stop_reason == "agent_finished"
+    assert result.call_counts.catalog == 1
+
+
+async def test_measured_cumulative_token_budget_stops_before_another_decision(tmp_path):
+    class MeasuredPlanner:
+        agent_protocol = "agent-loop-v1"
+
+        def __init__(self):
+            self.requests = []
+
+        async def decide(self, req):
+            self.requests.append(req)
+            action = (
+                m.AgentSearchDecision(query="revenue")
+                if not req.context["candidates"]
+                else m.AgentComposeDecision()
+            )
+            return m.ModuleResult(
+                call_id=req.call_id,
+                data=action,
+                usage=m.Usage(input_tokens=7, output_tokens=4, provider_requests=1),
+            )
+
+    planner = MeasuredPlanner()
+    result = await execute(
+        tmp_path,
+        request(max_output_tokens=6),
+        planner=planner,
+    )
+    assert (result.status, result.stop_reason) == ("budget_exceeded", "token_budget")
+    assert result.usage.output_tokens == 8
+    assert result.call_counts.model_calls == 2
+    assert len(planner.requests) == 2
+    assert planner.requests[0].token_budget.max_output_tokens_this_call == 6
+    assert planner.requests[1].token_budget.max_output_tokens_this_call == 2
 
 
 async def test_independent_concurrent_runs(tmp_path):

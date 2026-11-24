@@ -25,29 +25,60 @@ def catalog_page(controller, offset: int, limit: int, *, max_bytes: int | None =
     if max_bytes is not None:
         budget = min(budget, max_bytes)
     page = {"offset": offset, "sources": [], "total": len(sources), "next_offset": None}
-    # 先为省略标记预留空间，较小预算至少可保留完整source_id/format。
-    page["metadata_omitted"] = True
     metadata_omitted = False
-    for source in sources[offset : offset + limit]:
-        value = source.model_dump(mode="json")
-        # 标识符保持完整，较大的描述字段允许明确的预览；不能伪造缩短的 source_id。
-        projected = {"source_id": value["source_id"], "format": value["format"]}
+    for index, source in enumerate(sources[offset : offset + limit], start=offset):
+        previous_offset = page["next_offset"]
+        page["next_offset"] = index + 1 if index + 1 < len(sources) else None
+        # 优先保证完整 source_id 能装入极小页面，不被预留的 metadata_omitted 挤走。
+        projected = {"source_id": source.source_id}
         page["sources"].append(projected)
-        end = offset + len(page["sources"])
-        page["next_offset"] = end if end < len(sources) else None
         if len(canonical_json(page)) > budget:
             page["sources"].pop()
+            if page["sources"] or page.get("omitted_sources"):
+                # 先前的行或省略提示已占用空间，让后续 ID 在新页独立试装。
+                page["next_offset"] = previous_offset
+                break
+            # 页首标识本身也放不下时只跳过该行，保留可继续读取的精确偏移。
+            page["omitted_sources"] = 1
+            if len(canonical_json(page)) > budget:
+                raise RunStopped("budget_exceeded", "catalog_context_limit")
             break
-        for key in ("name", "summary", "metadata", "version", "content_hash"):
-            projected[key] = _preview(value.get(key), max(64, budget // 8))
+        value = source.model_dump(mode="json")
+        added_keys: list[str] = []
+        row_omitted = False
+        for key in ("format", "name", "summary", "metadata", "version", "content_hash"):
+            projected[key] = (
+                value[key] if key == "format" else _preview(value[key], max(64, budget // 8))
+            )
+            if key == "format" and len(canonical_json(page)) > budget:
+                projected[key] = _preview(value[key], max(64, budget // 8))
             if len(canonical_json(page)) > budget:
                 projected.pop(key)
-                metadata_omitted = True
-    end = offset + len(page["sources"])
-    page["next_offset"] = end if end < len(sources) else None
+                row_omitted = True
+            else:
+                added_keys.append(key)
+        if row_omitted:
+            was_omitted = metadata_omitted
+            metadata_omitted = True
+            page["metadata_omitted"] = True
+            while len(canonical_json(page)) > budget and added_keys:
+                projected.pop(added_keys.pop())
+            if len(canonical_json(page)) > budget:
+                # 无法诚实携带 metadata_omitted 标记时，不静默返回缺字段的条目。
+                page["sources"].pop()
+                metadata_omitted = was_omitted
+                if not metadata_omitted:
+                    page.pop("metadata_omitted", None)
+                if page["sources"] or page.get("omitted_sources"):
+                    page["next_offset"] = previous_offset
+                    break
+                page["omitted_sources"] = 1
+                if len(canonical_json(page)) > budget:
+                    raise RunStopped("budget_exceeded", "catalog_context_limit")
+                break
     if not metadata_omitted:
-        page.pop("metadata_omitted")
-    if offset < len(sources) and not page["sources"]:
+        page.pop("metadata_omitted", None)
+    if len(canonical_json(page)) > budget:
         raise RunStopped("budget_exceeded", "catalog_context_limit")
     return page
 
@@ -92,6 +123,13 @@ def _base_context(controller, state: dict) -> dict:
             "omitted_fields": [],
         },
     }
+    if state.get("search_history"):
+        result["search_history"] = []
+    if c.req.continuation is not None:
+        # 原始 RunRequest 已在 run 准入时深复制并在持久运行中保存。
+        # 交接属于不可丢失输入，在任何试装、分页和最终预算检查前纳入框架；
+        # 只导出独立 JSON 数据，不导入历史 EvidenceRecord 或 Observation。
+        result["continuation"] = c.req.continuation.model_dump(mode="json")
     if feedbacks:
         result["content_feedback"] = feedbacks
         # 先为一个固定省略标记预留位置，避免最后补标记反而挤掉合法读取页。
@@ -122,6 +160,7 @@ def context_page_budget(controller, state: dict, *, observation: bool) -> int:
         "plan": bool(controller.subtasks),
         "completed_subtask_ids": bool(controller.completed_subtasks),
         "candidates": bool(state.get("candidates")),
+        "search_history": bool(state.get("search_history")),
     }
     base["context_status"]["omitted_fields"].extend(
         key for key, present in optional.items() if present
@@ -157,6 +196,11 @@ def build_agent_context(controller, state: dict) -> dict:
         "completed_subtask_ids": [task.subtask_id for task in c.completed_subtasks],
         "candidates": [item.model_dump(mode="json") for item in state.get("candidates", [])],
     }
+    if state.get("search_history"):
+        values["search_history"] = [
+            {"query": item["query"], "count": item["count"]}
+            for item in state["search_history"][-8:]
+        ]
     reserved = {key for key, value in values.items() if value not in (None, [])}
     result["context_status"]["omitted_fields"].extend(sorted(reserved))
     # 页的 next_offset 根据实际 text 计算，不能再对整个页面做二次文本预览。
@@ -221,31 +265,6 @@ def build_agent_context(controller, state: dict) -> dict:
             if limit <= 64:
                 break
             limit = max(64, limit // 2)
-    # omitted_fields 自身也占字节。完整页优先，必要时回收已经装入的
-    # 可选预览，而不是因几个省略标签把合法页面变成一次预算失败。
-    for key in (
-        "candidates",
-        "completed_subtask_ids",
-        "plan",
-        "answer",
-        "verification",
-        "last_action",
-    ):
-        if len(canonical_json(result)) <= maximum:
-            break
-        empty = [] if key in {"candidates", "completed_subtask_ids", "plan"} else None
-        if result[key] != empty:
-            result[key] = empty
-            omitted = result["context_status"]["omitted_fields"]
-            if key not in omitted:
-                omitted.append(key)
-    page = result["observation_read"]
-    # 过去的页面可省略，当前请求页的 text 和 next_offset 必须原样保留。
-    while len(canonical_json(result)) > maximum and page and page.get("previous_pages"):
-        page["previous_pages"].pop(0)
-        page["omitted_pages"] += 1
-    if len(canonical_json(result)) > maximum:
-        raise RunStopped("budget_exceeded", "planner_context_limit")
     entries = []
     for index in range(max(len(c.observations), len(c.evidence))):
         if index < len(c.observations):
@@ -286,18 +305,42 @@ def build_agent_context(controller, state: dict) -> dict:
                         counts["omitted"] += 1
                 break
             limit = max(64, limit // 2)
+    current_bytes = len(canonical_json(result))
+    catalog_max_sources = getattr(c.cfg, "planner_catalog_max_sources", None)
+    catalog_preview_bytes = getattr(c.cfg, "planner_catalog_preview_bytes", None)
+    catalog_limit = (
+        min(maximum, current_bytes + catalog_preview_bytes)
+        if catalog_preview_bytes is not None
+        else maximum
+    )
+    # 空目录条目 {"format":"","name":"","source_id":"","summary":""} 至少占 49 字节；
+    # 剩余空间不足时提前终止，避免大目录下对完整上下文执行 O(N²) 重复序列化。
     for source in sorted(c.sources.values(), key=lambda item: item.source_id):
+        if (
+            catalog_max_sources is not None
+            and len(result["catalog"]["sources"]) >= catalog_max_sources
+        ):
+            break
+        if current_bytes + 48 > catalog_limit:
+            break
         value = {
             "source_id": source.source_id,
             "name": source.name,
             "format": source.format,
             "summary": _preview(source.summary, min(preview, maximum // 4)),
         }
+        entry_bytes = len(canonical_json(value)) + (1 if result["catalog"]["sources"] else 0)
+        # omitted 数值减少最多使数字少占 4 字节，先用增量估算过滤明显超限的条目。
+        if current_bytes + entry_bytes > catalog_limit + 4:
+            continue
         result["catalog"]["sources"].append(value)
         result["catalog"]["omitted"] -= 1
-        if len(canonical_json(result)) > maximum:
+        updated_bytes = len(canonical_json(result))
+        if updated_bytes > catalog_limit:
             result["catalog"]["sources"].pop()
             result["catalog"]["omitted"] += 1
-    if len(canonical_json(result)) > maximum:
+        else:
+            current_bytes = updated_bytes
+    if current_bytes > maximum:
         raise RunStopped("budget_exceeded", "planner_context_limit")
     return result

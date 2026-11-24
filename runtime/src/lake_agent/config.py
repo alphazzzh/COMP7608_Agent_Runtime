@@ -89,7 +89,7 @@ class ServerSettings(m.Model):
 
     port: Annotated[int, Field(ge=1, le=65535)] = 8765
     data_dir: Path = Path("runs/workspace")
-    max_active_runs: Annotated[int, Field(ge=1)] = 2
+    max_active_runs: Annotated[int, Field(ge=1, le=64)] = 2
 
     @field_validator("data_dir", mode="before")
     @classmethod

@@ -14,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from .. import models as m
 from ..validation import canonical_json, validate_dag, validate_tool_specs
 from .agent_context import build_agent_context, catalog_page, context_page_budget
-from .errors import RunStopped
+from .errors import ActionValidationError, RunStopped
 
 
 class AgentState(TypedDict, total=False):
@@ -31,6 +31,9 @@ class AgentState(TypedDict, total=False):
     catalog_page: dict | None
     verification: m.Verification | None
     last_action: dict | None
+    invalid_output_retries: int
+    search_history: list[dict]
+    consecutive_searches: int
 
 
 def build_agent_workflow(controller, guard):
@@ -41,8 +44,6 @@ def build_agent_workflow(controller, guard):
     async def initialize(state):
         if c.req.mode == "no_verifier" and c.cfg.require_verification:
             raise RunStopped("failed", "invalid_run_policy")
-        if c.cfg.max_input_tokens is not None or c.cfg.max_output_tokens is not None:
-            raise RunStopped("failed", "unsupported_token_budget")
         try:
             c.specs = validate_tool_specs(c.data.tool_specs())
         except Exception as exc:
@@ -57,6 +58,9 @@ def build_agent_workflow(controller, guard):
             "catalog_page": None,
             "verification": None,
             "last_action": None,
+            "invalid_output_retries": 0,
+            "search_history": [],
+            "consecutive_searches": 0,
         }
 
     async def decide(state):
@@ -78,7 +82,24 @@ def build_agent_workflow(controller, guard):
             ),
             m.ModuleResult[m.AgentAction],
             provider=True,
+            recoverable_errors={"invalid_model_output"},
         )
+        if reply.status == "error":
+            detail = reply.error.model_dump(mode="json")
+            retries = state.get("invalid_output_retries", 0) + 1
+            await c._event(
+                "agent.action.rejected",
+                status="rejected",
+                detail={"kind": "decide", "code": reply.error.code, "error": detail},
+            )
+            if retries > 2:
+                raise RunStopped("failed", "invalid_model_output")
+            return {
+                "turns": state["turns"] + 1,
+                "invalid_output_retries": retries,
+                "last_action": {"kind": "decide", "status": "rejected", "error": detail},
+                "next_node": "decide",
+            }
         decision = reply.data
         ref = await c._artifact(decision)
         await c._event(
@@ -89,15 +110,33 @@ def build_agent_workflow(controller, guard):
         destination = (
             "read" if decision.kind in {"read_observation", "read_catalog"} else decision.kind
         )
-        return {"turns": state["turns"] + 1, "decision": decision, "next_node": destination}
+        return {
+            "turns": state["turns"] + 1,
+            "decision": decision,
+            "invalid_output_retries": 0,
+            "next_node": destination,
+        }
 
     def accepted(kind, **extra):
         return {"last_action": {"kind": kind, "status": "ok", **extra}}
 
-    async def reject(kind, code, *, reason=None):
+    async def reject(kind, code, *, reason=None, count=None):
+        diagnostics = {
+            "tool_schema_mismatch": "Check args against the registered input_schema, including required fields and value types.",
+            "source_authorization_mismatch": "source_ids must exactly match the registered source IDs in args, and every ID must be in the catalog.",
+            "invalid_plan": "Use unique step IDs and an acyclic dependency graph that refers only to steps in this action.",
+            "invalid_evidence_selection": "Select unique evidence_ids from the current evidence_summary, or omit evidence_ids to use all evidence.",
+            "incomplete_verification_evidence": "Required verification must include every current evidence item in its original order, or omit evidence_ids.",
+            "duplicate_search": "This search query was already executed. Use tools on current candidates, try substantially different keywords, or stop.",
+            "search_loop_limit": "Reached the consecutive search limit without calling tools. Inspect or extract from current candidates, compose an answer, or stop.",
+        }
         detail = {"kind": kind, "code": code}
+        if code in diagnostics:
+            detail["message"] = diagnostics[code]
         if reason is not None:
             detail["reason"] = reason
+        if count is not None:
+            detail["count"] = count
         await c._event("agent.action.rejected", status="rejected", detail=detail)
         return {
             "last_action": {"status": "rejected", **detail},
@@ -111,12 +150,39 @@ def build_agent_workflow(controller, guard):
                 len(set(action.source_ids)) != len(action.source_ids)
                 or not set(action.source_ids) <= c.sources.keys()
             ):
-                raise RunStopped("failed", "invalid_plan")
-        focus = m.Focus(query=action.query, source_ids=action.source_ids or [])
-        candidates = await c._search(scope, focus, source_ids=action.source_ids)
+                return await reject("search", "source_authorization_mismatch")
+        norm_query = " ".join(action.query.lower().split())
+        norm_sources = sorted(action.source_ids) if action.source_ids is not None else None
+        history = list(state.get("search_history") or [])
+        if getattr(c.cfg, "deduplicate_searches", False) and any(
+            item["norm_query"] == norm_query and item["source_ids"] == norm_sources
+            for item in history
+        ):
+            return await reject(
+                "search",
+                "duplicate_search",
+                reason=f"Query '{action.query}' was already searched.",
+            )
+        consecutive = state.get("consecutive_searches", 0)
+        max_consecutive = getattr(c.cfg, "max_consecutive_searches", None)
+        if max_consecutive is not None and consecutive >= max_consecutive:
+            return await reject(
+                "search",
+                "search_loop_limit",
+                reason=f"Already ran {consecutive} consecutive searches without other actions.",
+            )
+        candidates = await c._search(scope, action.query, source_ids=action.source_ids)
+        entry = {
+            "norm_query": norm_query,
+            "query": action.query,
+            "source_ids": norm_sources,
+            "count": len(candidates),
+        }
         return {
-            **accepted("search", count=len(candidates)),
+            **accepted("search", query=action.query, count=len(candidates)),
             "candidates": candidates,
+            "search_history": [*history[-15:], entry],
+            "consecutive_searches": consecutive + 1,
             "read_result": None,
             "read_pages": [],
             "read_count": 0,
@@ -131,9 +197,13 @@ def build_agent_workflow(controller, guard):
                 for step in decision.steps
             ]
         )
-        await c._execute_plan(plan, scope, [], authorized_sources=set(c.sources))
+        try:
+            await c._execute_plan(plan, scope)
+        except ActionValidationError as exc:
+            return await reject("tools", exc.code, count=len(decision.steps))
         return {
             **accepted("tools", steps=len(plan.steps)),
+            "consecutive_searches": 0,
             "read_result": None,
             "read_pages": [],
             "read_count": 0,
@@ -158,6 +228,7 @@ def build_agent_workflow(controller, guard):
                     break
             return {
                 **accepted(action.kind),
+                "consecutive_searches": 0,
                 "read_result": result,
                 "catalog_page": None,
                 "read_pages": [*result["previous_pages"], page],
@@ -177,6 +248,7 @@ def build_agent_workflow(controller, guard):
         )
         return {
             **accepted(action.kind),
+            "consecutive_searches": 0,
             "catalog_page": page,
             "read_result": None,
             "read_pages": [],
@@ -196,8 +268,8 @@ def build_agent_workflow(controller, guard):
                 raise ValueError("unknown completed task")
             if any(not set(s.depends_on) <= completed for s in tasks if s.subtask_id in completed):
                 raise ValueError("unfinished dependency")
-        except ValueError as exc:
-            raise RunStopped("failed", "invalid_plan") from exc
+        except ValueError:
+            return await reject("plan", "invalid_plan")
         c.subtasks = tasks
         c.completed_subtasks = [s for s in tasks if s.subtask_id in completed]
         ref = await c._artifact(action)
@@ -205,13 +277,21 @@ def build_agent_workflow(controller, guard):
         return accepted("plan")
 
     async def compose(state):
-        instructions = state["decision"].revision_instructions
+        action = state["decision"]
+        instructions = action.revision_instructions
+        try:
+            selected_evidence = c._select_evidence(action.evidence_ids)
+        except ActionValidationError:
+            return await reject("compose", "invalid_evidence_selection")
         if instructions is not None and c.answer is None:
             return await reject(
                 "compose", "revision_answer_required", reason="Compose an initial answer first."
             )
         previous = c.answer
-        if not await c._compose(revision_instructions=instructions):
+        if not await c._compose(
+            revision_instructions=instructions,
+            evidence_ids=[item.evidence_id for item in selected_evidence],
+        ):
             return {
                 "last_action": {
                     "kind": "compose",
@@ -221,14 +301,24 @@ def build_agent_workflow(controller, guard):
             }
         # 完全相同的答案不能通过一次无变化生成洗掉已失败的核验。
         verification = state.get("verification") if c.answer == previous else None
-        return {**accepted("compose"), "verification": verification}
+        return {**accepted("compose"), "consecutive_searches": 0, "verification": verification}
 
     async def verify(state):
+        action = state["decision"]
         if c.answer is None:
             return await reject("verify", "answer_required")
         if c.req.mode == "no_verifier":
             return await reject("verify", "verification_disabled")
-        value = await c._verify()
+        try:
+            selected_evidence = c._select_evidence(action.evidence_ids)
+        except ActionValidationError:
+            return await reject("verify", "invalid_evidence_selection")
+        if c.cfg.require_verification and selected_evidence != c.evidence:
+            return await reject("verify", "incomplete_verification_evidence")
+        value = await c._verify(
+            evidence_ids=[item.evidence_id for item in selected_evidence],
+            covers_all=selected_evidence == c.evidence,
+        )
         if value is None:
             return {
                 "last_action": {
@@ -246,7 +336,11 @@ def build_agent_workflow(controller, guard):
             detail={"input_fingerprint": c.verification_receipt.input_fingerprint},
         )
         # recommendation 是下一轮模型的观察，不再强制跳回某个已固定子任务。
-        return {**accepted("verify", verdict=value.verdict), "verification": value}
+        return {
+            **accepted("verify", verdict=value.verdict),
+            "consecutive_searches": 0,
+            "verification": value,
+        }
 
     async def finish(state):
         if c.content_feedback:
@@ -298,7 +392,7 @@ def build_agent_workflow(controller, guard):
     graph.add_conditional_edges(
         "decide",
         lambda state: state["next_node"],
-        ["search", "tools", "read", "plan", "compose", "verify", "finish", "stop"],
+        ["decide", "search", "tools", "read", "plan", "compose", "verify", "finish", "stop"],
     )
     for name in ("search", "tools", "read", "plan", "compose", "verify"):
         graph.add_edge(name, "decide")

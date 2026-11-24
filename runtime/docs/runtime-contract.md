@@ -86,6 +86,8 @@ async def resume(
 
 每次外部派发前写 `started`，有效响应返回后立即写 `completed`；并行 worker 各自提交响应，不等待同伴。控制器仍唯一拥有授权、预算、观察与证据状态。JSONL 是审计，不能代替持久调用账本。恢复逐项匹配已知请求/响应重建状态；完整控制器 ID 序列保持稳定，不重新派发历史模型或工具请求。未知 `started` 调用以 `StateStoreError.code="recovery_outcome_unknown"` 拒绝恢复，包含幂等工具。
 
+单次调用期限限制适配器等待；如果有效回复在期限内到达，后续 SQLite 结算再慢也不会把该回复改判成适配器超时。明确取消仍向上传播，原运行总期限仍禁止后续派发。若在等待结算时停止，审计可标记有效响应已返回；能否恢复以持久账本为准。适配器收到独立的请求副本，结果按控制器保存的原始 `call_id` 校验。
+
 恢复读取要求运行时版本、实际源码摘要及请求/结果身份等状态校验通过；继续尚未终结的运行还要求可信工具契约一致。原绝对 UTC deadline 包含停机时间，历史预算不重置；正常终态（含预算停止与 provider 403 等普通错误）直接返回原结果，不读取工具清单或重新比较工具契约。取消、审计或状态写入故障仅在全部相关外部结果已知时可能恢复。源码变更、请求分叉或损坏状态均不能退回真实调用来尝试。
 
 持久状态另记录受支持的 `content_feedback_protocol` 或 null。恢复在返回缓存终态及异步端口调用前比较当前内容模块的能力，变化以 `recovery_contract_mismatch` 拒绝。失败内容响应和扩展修正请求按调用日志严格重建，不依赖内容模块的会话内存；修正调用只有 started、没有有效 completed 时也以 `recovery_outcome_unknown` 拒绝，原预算和期限不刷新。
@@ -106,8 +108,11 @@ async def resume(
 | `mode` | enum | 否 | `no_verifier` 或 `full_agent`；默认 `full_agent` |
 | `run_id` | string/null | 否 | 外部关联 ID；null 时由运行控制器生成 |
 | `config` | `RunConfig` | 否 | 本次运行的限制和版本信息；省略时构造默认 `RunConfig` |
+| `continuation` | `RunContinuation`/null | 否 | 默认 null 且序列化省略；冻结的历史进展线索，不是本轮证据或策略覆盖 |
 
 本文字段清单描述共享模型规范化后的对象字段，JSON 样例可省略具有默认值的字段；“调用时必需”表示没有默认值、必须由调用方提供的字段。省略字段与显式传入 null 不等价：只有类型允许 null 的字段才接受 null。共享模型仍拒绝额外字段和错误类型；运行控制器发给 adapter 的规范化请求包含已填充的默认值。
+
+`RunContinuation` 保存 `mission_id/cycle/summary/pending_items/previous_run_id/artifact_refs/truncated`，完整规范 UTF-8 JSON 最多 4096 字节。它作为 `context.continuation` 进入原规划上下文字节预算，恢复时重用原请求，不从新的 Mission 状态重算；不改变 question、权限、核验政策，不导入旧 EvidenceRecord 或引用身份。普通 run 不提供此字段时保持原序列化形状。调度、累计硬限制及 HTTP 接口见[持续任务说明](persistent-missions.md)。
 
 ### `RunConfig`
 
@@ -133,7 +138,7 @@ async def resume(
 | `max_observation_reads` | integer | 否 | 默认 8，允许 0；每个 run 成功接受的本地观察读取次数上限 |
 | `max_identical_tool_calls` | integer | 否 | 默认 2，最小 1；相同子任务、工具名称和规范化参数可接受的逻辑动作次数上限 |
 | `max_parallel_tool_calls` | integer | 否 | 默认 4；严格整数 1–32，拒绝布尔值、浮点数和字符串；同一 run 同时运行的工具 worker 上限，1 表示串行限制，不为工具授予安全并行权限 |
-| `max_input_tokens` / `max_output_tokens` | integer/null | 否 | 预留的 run 级累计上限；当前运行时尚不支持，任何非 null 配置均在数据/模型 adapter 调用前以 `failed/unsupported_token_budget` 拒绝 |
+| `max_input_tokens` / `max_output_tokens` | integer/null | 否 | provider 实测 input/output token 的 run 级累计上限；达到上限后在下一次 provider 派发前以 `budget_exceeded/token_budget` 停止，启用时缺测用量以 `failed/token_usage_unavailable` 收敛 |
 | `dataset_snapshot` | string/null | 否 | 数据目录版本或快照 ID |
 | `model_id` | string | 是 | 所有规划器/内容模块 provider 请求使用的同一模型 ID，便于公平比较 |
 | `model_params` | object | 是 | 所有规划器/内容模块 provider 请求共用的采样/解码参数，至少记录 temperature 或确定性设置 |
@@ -145,9 +150,9 @@ async def resume(
 
 `prompt_version` 是宿主配置声明的审计标签，不验证外部模块实际发出的提示正文。本轮内容修正扩展不改默认标签或私有配置；实际协议、调用请求/事件和源码摘要共同提供行为证据。
 
-表中“必需”指有效配置中的字段；共享 `RunConfig` 会为省略的字段填充默认值。规划提示词默认版本为 `planner-v1.1-exploration`，内容提示词默认版本仍为 `content-v0.1`。共享模型采用严格类型并拒绝额外字段，所有上限须满足表中整数约束；重试数及观察读取次数允许为零，token 上限可为 null，非 null 时须为正整数。旧工具的 `parallel_safe` 默认为 false，因此省略新字段时不会因并发上限默认 4 而自动并行。
+表中“必需”指有效配置中的字段；共享 `RunConfig` 会为省略的字段填充默认值。规划提示词默认版本为 `planner-v1.2-continuation`，内容提示词默认版本仍为 `content-v0.1`。共享模型采用严格类型并拒绝额外字段，所有上限须满足表中整数约束；重试数及观察读取次数允许为零，token 上限可为 null，非 null 时须为正整数。旧工具的 `parallel_safe` 默认为 false，因此省略新字段时不会因并发上限默认 4 而自动并行。
 
-当前以时间、调用次数、单次响应字节数、规划上下文字节数及完整规划 HTTP 请求字节数控量，不宣称 token 硬预算。未来若启用 token cap，须先定义与指定模型匹配的完整输入 tokenizer、每次输出上限及实际 usage 对账；只裁剪工作上下文不足以提供此保证。一次已开始的失败请求仍消耗模型调用数、时间及实际 token/费用。未发生或未测到的用量分别按已知的 0 或 `null` 记录，不得把未知用量填为 0。每个 AgentPlannerPort.decide 调用以及内容模块的 `compose`/`verify` 最多发起一个模型请求；`prepare_catalog`/`search` 仅执行本地索引或检索，不发模型请求。adapter/SDK 必须关闭隐式重试和后台请求。`max_data_calls` 包含 DataPort.catalog 分页和 DataPort.invoke 的全部物理尝试及中断时保留的意图预留；工具并行不会增加该额度。
+运行时以时间、调用次数、单次响应字节数、规划上下文字节数及完整规划 HTTP 请求字节数控量；若配置 token cap，则只按 provider 返回的实际 input/output token 累计止损，不用本地 tokenizer 猜测。达到上限的下一次 provider 派发被阻止；启用上限但 provider 未报告对应用量时 fail closed。一次已开始的失败请求仍消耗模型调用数、时间及实际 token/费用。未发生或未测到的用量分别按已知的 0 或 `null` 记录，不得把未知用量填为 0。每个 AgentPlannerPort.decide 调用以及内容模块的 `compose`/`verify` 最多发起一个模型请求；`prepare_catalog`/`search` 仅执行本地索引或检索，不发模型请求。adapter/SDK 必须关闭隐式重试和后台请求。`max_data_calls` 包含 DataPort.catalog 分页和 DataPort.invoke 的全部物理尝试及中断时保留的意图预留；工具并行不会增加该额度。
 
 ## 3. 运行控制器与数据端口
 
@@ -172,7 +177,7 @@ class DataPort(Protocol):
 | `timeout_ms` | integer | 运行控制器按 `min(per_call_timeout_ms, remaining_wall_time_ms)` 计算；运行控制器与 adapter 均对 awaitable/底层请求应用 timeout |
 | `max_output_bytes` | integer | 单次响应序列化字节上限，超限响应由运行控制器拒绝 |
 
-`ModelCallContext.token_budget` 保留 `{remaining_input_tokens, remaining_output_tokens, max_output_tokens_this_call}` 三字段；当前可启动运行中均为 null。共享类型约束这些值为非负整数或 null，并要求单次 output 上限不高于剩余额度，但该类型约束本身不代表当前控制器已实现 token cap。`JsonPlanner` 也会在派发前拒绝带非 null token budget 的直接请求。本地无 provider 请求时对应 usage 记为 0，未测得的 provider token 用量保留 null。
+`ModelCallContext.token_budget` 保留 `{remaining_input_tokens, remaining_output_tokens, max_output_tokens_this_call}` 三字段；配置上限且已有实测用量时，控制器向下一次 provider 调用传递剩余额度，`max_output_tokens_this_call` 也由 `JsonPlanner` 映射到 provider 请求。共享类型约束这些值为非负整数或 null；控制器在收到回复后累计实际 usage，缺测时不会把未知值当作零。本地无 provider 请求时对应 usage 记为 0，未测得的 provider token 用量保留 null。
 
 `CatalogRequest` 在上述元数据外含 `snapshot_id`（首页使用请求中的 `dataset_snapshot`；若为 null，由数据模块建立当前冻结快照；后续页必须传回首页的 `catalog_snapshot_id`）、`page_size` 和 `cursor`（第一页为 null）。`CatalogResult` 含 `call_id`、`status`、`catalog_snapshot_id`、`sources`、`next_cursor`、`has_more`、`error` 和 `duration_ms`；`status` 为 `ok` 或 `error`，成功时 `error=null`，失败时 `sources=[]`、`next_cursor=null`、`has_more=false` 且 `error` 含 `code`、`message`、`retryable`。数据模块必须保证同一快照所有页稳定、无重复且 cursor 可继续读取；运行控制器按 cursor 读取完整目录，并在每页后检查累计数量/字节数。若超过 `max_catalog_sources`/`max_catalog_bytes`，run 以 `budget_exceeded/catalog_limit` 结束，不把部分目录当完整目录交给内容模块搜索。若请求了具体 `dataset_snapshot`，每页返回的快照必须完全匹配，否则运行控制器以 `failed/catalog_snapshot_mismatch` 结束。
 
@@ -381,7 +386,7 @@ class ContentPort(Protocol):
 
 ### `compose`（运行控制器 → 内容模块）
 
-除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、`completed_subtasks` 和带定位的 `EvidenceRecord[]`。completed_subtasks 是可选计划中由模型标记完成的摘要，可以为空；evidence 也可以为空，用于目录说明、澄清或资料不足说明。正文事实不得超出实际可用输入，不能编造引用。当前 `token_budget.max_output_tokens_this_call` 为 null，不构成输出 token 上限；未来启用该上限时，内容模块不得覆盖或扩大其非 null 值。
+除统一调用封套及 `ModelCallContext` 外，输入数据含原问题、`completed_subtasks` 和带定位的 `EvidenceRecord[]`。completed_subtasks 是可选计划中由模型标记完成的摘要，可以为空；evidence 也可以为空，用于目录说明、澄清或资料不足说明。正文事实不得超出实际可用输入，不能编造引用。`token_budget.max_output_tokens_this_call` 在配置累计 output 上限且已有可用用量时为剩余额度；内容模块不得覆盖或扩大其非 null 值。provider 回复缺少对应 usage 时运行失败并保留已发生的调用账本。
 
 `ComposeRequest.revision: AnswerRevision | None` 是默认空的增量字段，None 时序列化省略；首次生成继续接收原有业务字段。有旧答案时，控制器发送以下修订信息，使无状态内容模块不必依赖内部会话：
 
@@ -461,7 +466,7 @@ class AgentPlannerPort(Protocol):
 | `remaining_turns` | 此次决策前剩余轮数，受 max_agent_turns 限制 |
 | `require_verification` | 宿主是否要求当前答案通过核验后完成 |
 
-控制器在调用前计算余量。`data_calls` 等于上限减去已预留的目录/工具物理调用；不得由适配器增加。token 预留字段继续放在 ModelCallContext.token_budget，当前仅接受 null。JsonPlanner 仅向 provider 发送上述七项业务输入，运行 ID 等不透明关联身份保留在本地封套。
+控制器在调用前计算余量。`data_calls` 等于上限减去已预留的目录/工具物理调用；不得由适配器增加。token 预留字段继续放在 ModelCallContext.token_budget；JsonPlanner 将非 null 的单次 output 余量映射到 provider 请求。JsonPlanner 仅向 provider 发送上述七项业务输入，运行 ID 等不透明关联身份保留在本地封套。
 
 动作是以 kind 区分的严格联合类型，详见本文开头的动作表；未知 kind、额外字段或类型错误均不被静默修正。
 
@@ -511,6 +516,8 @@ JsonPlanner 使用 provider JSON object 模式与本地严格类型校验；动�
 完整 `AgentDecisionRequest.context` 按规范化 JSON 的 UTF-8 字节数计量，不得超过 max_planner_context_bytes。上下文包括目录/候选、计划、答案/核验、最近动作、观察与证据预览和分页结果。小值保留结构，大值用带 truncated/text/total_bytes 的对象显式预览；ID 无法完整容纳时省略整项，不编造缩短后的 ID。
 
 context_status.observations/evidence 记录 total/included/omitted，omitted_fields 记录整字段省略。按确定顺序优先尝试最近的工具观察和证据；分页生成前预留未解决反馈的阶段/调用ID/错误码，紧随读取的决策保留完整 text/next_offset，其他预览和更老 previous_pages 可让出空间。后续动作产生新反馈时，旧页面可通过 omitted_fields 明确省略。裁剪或省略不证明原始结果不存在该字段。完整结果、证据与审计文件继续保留。
+
+`read_catalog` 按完整 `source_id` 的稳定顺序分页。`format` 等描述字段可预览或按 `metadata_omitted` 提示省略。若页首的完整 ID 放不下，`catalog_page.omitted_sources` 表示跳过的页首行数；即使 `sources` 为空也可继续使用非空的 `next_offset`。省略行不会获得缩短的 ID，且跳过不改变控制器保存的完整目录及来源授权。若连最小分页及省略提示也无法容纳，保留 `budget_exceeded/catalog_context_limit`。
 
 当完整工具观察预览装不下时，构造器会在剩余预算内尝试保留带 preview_omitted=true 的最小索引：完整 observation_id、tool_name、source_ids 和 status。该索引不含被省略的结果正文，模型可用 read_observation 读取；若连索引也无法容纳，仍由 context_status.observations.omitted 明示省略。上述预览处理不改变控制器保存的完整状态或核验指纹。
 
@@ -580,7 +587,7 @@ max_subtasks 只约束可选计划大小；max_plan_steps 与 call_counts.steps 
 | `agent_stopped`、`agent_verification_failed` | `insufficient_evidence` | 保留最后的有效答案或 null |
 | `agent_turn_budget`、`step_budget`、`data_call_budget`、`model_call_budget`、`token_budget`、`catalog_limit`、`observation_read_budget`、`planner_context_limit`、`catalog_context_limit` | `budget_exceeded` | 保留最后的有效答案或 null |
 | `time_budget`、`call_timeout` | `timeout` | 保留最后的有效答案或 null |
-| `retry_exhausted`、`tool_error`、`module_error`、`invalid_plan`、`invalid_module_response`、`invalid_observation_read`、`invalid_catalog_read`、`repeated_tool_call`、`unsupported_token_budget`、`invalid_planner_protocol`、`invalid_run_policy`、目录/审计/适配器错误 | `failed` | 保留最后的有效答案或 null |
+| `retry_exhausted`、`tool_error`、`module_error`、`invalid_plan`、`invalid_module_response`、`invalid_observation_read`、`invalid_catalog_read`、`repeated_tool_call`、`token_usage_unavailable`、`invalid_planner_protocol`、`invalid_run_policy`、目录/审计/适配器错误 | `failed` | 保留最后的有效答案或 null |
 
 | verdict | 合法 recommendation.action | 控制器行为 |
 |---|---|---|
@@ -599,6 +606,8 @@ context.verification_status 为 missing/current/stale，独立于有界核验预
 `RunResult` 至少包含：`schema_version`、`run_id`、`task_id`、`mode`、`status`、`stop_reason`、`answer`（无答案时为 null）、累计 `usage`、`call_counts`、`started_at`、`ended_at`、`duration_ms`、`versions` 和 `trace_ref`。trace 是事件的唯一权威来源；不在返回对象里复制第二份事件数组。
 
 `RunResult.failure` 可空，非空时是 `{phase, call_id, error}`，用于保留最近尚未解决的具体失败；None时序列化省略。预算/时间停止可以同时保留此前内容错误，成功终态不携带残留失败。Web优先使用此字段，旧历史从已有失败事件回退展示；显示推导不改变恢复状态，也不补造旧记录未保存的模型输出。
+
+`RunResult.source_funnel` 是可选的结构化来源漏斗：`searched_sources` 为成功检索返回的候选，`visited_sources` 为实际派发工具步骤声明的来源，`evidence_sources` 为控制器接纳证据的来源，`cited_sources` 为最终答案引用证据对应的来源。它只汇总控制器已验证的身份，不替代审计工件中的详细定位。
 
 `call_counts` 的计数口径固定为：`planner` 是运行控制器→AgentPlannerPort.decide 调用次数，`content` 是运行控制器→ContentPort 方法调用次数（包含本地 `prepare_catalog`/`search`），`model_calls` 是按上述保守规则结算的 provider 请求数，`catalog` 与 `tools` 分别统计 DataPort.catalog/DataPort.invoke 的物理尝试及中断时保留的意图预留，`retries` 是实际派发的数据模块额外尝试次数，`steps` 是实际派发的 DataPort.invoke 逻辑步骤数，`observation_reads` 是成功接受的本地观察读取页数。`max_subtasks` 限制计划子任务数，`max_plan_steps` 限制 `steps`；`catalog + tools` 共用 `max_data_calls`，不以并发数倍增额度，`observation_reads` 独立受 `max_observation_reads` 限制。准备了意图但没有实际派发时，不增加 `steps` 或 `retries`。`RunResult.usage.provider_requests` 是全 run 累计的非负整数，可大于 1；累计 token/费用中存在未测量用量时，对应字段保持 null。已知未发生的调用/token 为 0。
 
@@ -717,7 +726,7 @@ class AttemptTraceSink(TraceSink, Protocol):
     "dataset_snapshot": "lake-v3",
     "model_id": "team-selected-model",
     "model_params": {"temperature": 0},
-    "prompt_versions": {"planner": "planner-v1.1-exploration", "content": "content-v0.1"},
+    "prompt_versions": {"planner": "planner-v1.2-continuation", "content": "content-v0.1"},
     "code_version": null,
     "config_version": "dev-v1"
   }
@@ -745,7 +754,7 @@ class AttemptTraceSink(TraceSink, Protocol):
   "started_at": "2026-10-22T10:20:25Z",
   "ended_at": "2026-10-22T10:20:30Z",
   "duration_ms": 5000,
-  "versions": {"dataset_snapshot": "lake-v3", "model_id": "team-selected-model", "model_params": {"temperature": 0}, "prompt_versions": {"planner": "planner-v1.1-exploration", "content": "content-v0.1"}, "code_version": null, "config_version": "dev-v1"},
+  "versions": {"dataset_snapshot": "lake-v3", "model_id": "team-selected-model", "model_params": {"temperature": 0}, "prompt_versions": {"planner": "planner-v1.2-continuation", "content": "content-v0.1"}, "code_version": null, "config_version": "dev-v1"},
   "trace_ref": "runs/run-123/events.jsonl"
 }
 ```
@@ -755,7 +764,7 @@ class AttemptTraceSink(TraceSink, Protocol):
 1. 数据模块的真实 `SourceRecord`/`EvidenceRecord` schema、工具清单、`query` 参数 schema、数据快照命名及错误码；确认 benchmark 快照能完整纳入 `max_catalog_sources`/`max_catalog_bytes`。若不能，三人先冻结任务子集或调整上限，再开始 run。
 2. 内容模块确认是否接受 `prepare_catalog` 建本地索引及 run-scoped handle，并确认 AnswerRecord 是否需要句子级引用。
 3. 三组 EvaluationMode 的固定 top-k、工具参数映射和评分标注；它们只属于评估侧，不添加生产模式或强制数据模块实现 extract。比较须采用相同数据范围、基础模型、采样和公开预算，完整记录统计定义及缺测项。
-4. 将来启用 token cap 所需的兼容 tokenizer、实际 usage 计量和控制器实现；当前 token caps 必须为 null，使用字节、调用数和时间预算控量。
+4. 真实 provider 的 token usage 兼容性；启用累计 token 上限时，须验证 planner 与 content 适配器都报告 input/output token，并覆盖达到上限、缺测和 provider 拒绝单次 output 上限的回归。
 5. 确认共享模型升级和请求/响应 JSON 样例，特别是受控并行声明、静态互斥 key 和终止事件逐调用列表；当前 JSON `schema_version` 保持 `1.0`，未来若调整兼容策略需单独冻结版本，不把文档 v0.5 当作已完成 schema 迁移。
 
 ## 11. 调研依据

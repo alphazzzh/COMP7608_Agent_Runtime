@@ -24,6 +24,7 @@ import sqlite3
 import stat
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -185,7 +186,8 @@ class SqliteStateStore:
         self._lock_dir = Path(str(self.path) + ".locks")
         self._mutex = threading.Lock()
         self._leases: dict[str, tuple[StateLease, int]] = {}
-        self._released: set[StateLease] = set()
+        # 调用者仍持有凭证时才需要处理重复释放，不为历史运行保留强引用。
+        self._released: weakref.WeakSet[StateLease] = weakref.WeakSet()
         self._closed = False
 
     async def create(self, run_id: str, state: dict) -> StateLease:

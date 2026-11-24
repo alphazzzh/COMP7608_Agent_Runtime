@@ -8,9 +8,10 @@
 |---|---|---|
 | [contracts/](contracts/) | 共享严格模型、并行参数、修订和内容反馈字段、JSON 边界 | `test_models.py`、`test_content.py` |
 | [adapters/](adapters/) | 模型请求和解析、配置读取、工厂资源所有权、隔离 CLI | `test_planner.py`、`test_model_content.py`、`test_configuration.py`、`test_profiles.py`、`test_isolated_cli.py` |
-| [engine/](engine/) | 自主动作用法、完成政策、核验新鲜度、反馈修订、观察分页、工具授权、预算及并行 | `test_agent_loop.py`、`test_verification.py`、`test_content_feedback.py`、`test_observations.py`、`test_execution.py`、`test_runtime.py`、`test_runtime_guards.py`、`test_parallel.py`、`test_graph.py` |
+| [engine/](engine/) | 自主动作用法、完成政策、核验新鲜度、反馈修订、观察分页、工具授权、预算、并行及冻结交接 | `test_agent_loop.py`、`test_verification.py`、`test_content_feedback.py`、`test_observations.py`、`test_execution.py`、`test_runtime.py`、`test_runtime_guards.py`、`test_parallel.py`、`test_graph.py`、`test_continuation.py` |
 | [recovery/](recovery/) | SQLite/审计、已知响应重放、准入和版本身份、状态恢复、取消清理 | `test_replay.py`、`test_agent_replay.py`、`test_admission.py`、`test_frontier.py`、`test_content_feedback.py`、`test_answer_state.py`、`test_cancellation.py`、`test_state.py`、`test_trace.py` |
-| [web/](web/) | HTTP/展示政策、任务身份、真正删除、工作台生命周期、失败详情、评估导入 | `test_http.py`、`test_lifecycle.py`、`test_workspace.py`、`test_failures.py`、`test_evaluations.py` |
+| [web/](web/) | HTTP/展示政策、任务身份、真正删除、工作台生命周期、失败详情、评估导入及 Mission run 所有权 | `test_http.py`、`test_lifecycle.py`、`test_workspace.py`、`test_failures.py`、`test_evaluations.py`、`test_mission_runs.py` |
+| [missions/](missions/) | 持久事件去重、原子领取/预留/结算、周期合并、状态操作、重启对账、未知结果和页面竞态 | `test_store.py`、`test_service.py`、`test_handoff.py`、`test_http.py`、`test_frontend.py` |
 | [evaluation/](evaluation/) | 固定 Top-k、无核验、强制核验三组对照，离线指标与报告契约 | `test_ablation.py`、`test_models.py` |
 | [support/](support/) | 多个测试复用的显式端口、请求构造器、资源关卡和评估工具 | 见下表；本目录不是生产包 |
 
@@ -29,6 +30,7 @@ uv run --offline --extra dev --extra web --frozen pytest --collect-only -q
 uv run --offline --extra dev --extra web --frozen pytest -q tests/contracts tests/adapters
 uv run --offline --extra dev --extra web --frozen pytest -q tests/engine tests/recovery
 uv run --offline --extra dev --extra web --frozen pytest -q tests/web tests/evaluation
+uv run --offline --extra dev --extra web --frozen pytest -q tests/missions tests/engine/test_continuation.py tests/web/test_mission_runs.py
 
 # 按实际行为定位；可以组合 -k、-x、-vv
 uv run --offline --extra dev --extra web --frozen pytest -q tests/engine/test_verification.py
@@ -42,6 +44,10 @@ uv build --offline
 ```
 
 某个参数化用例可以直接使用 `--collect-only` 输出的完整 node ID。迁移后的 node ID 包含职责目录，旧的 `tests/test_*.py` 路径不再适用；项目中的历史计划和验收记录只记录当时路径，不作为当前执行命令。
+
+持续任务测试使用临时真实 SQLite 与内存 ASGI 覆盖创建、32 KiB 请求边界、UTC epoch 时间、手动事件去重、固定延迟错过合并、累计硬限制、暂停/结束、原截止时间、full_agent 禁用、崩溃窗口对账和 unknown outcome 保留预留。`engine/test_continuation.py` 检查普通请求兼容、冻结交接、规划上下文预算与恢复；`web/test_mission_runs.py` 检查既定 run 身份、策略不可提高以及独立 resume/delete 拒绝。
+
+`missions/test_frontend.py` 需要本机 Node.js，直接执行生产脚本并使用 DOM/HTTP fixture 验证纯文本、就绪配置、额度、动作幂等、选择竞态、可见轮询与 BFCache。完成标记防止未释放的 Promise 被 Node 提前退出伪装成通过；它不提供浏览器截图、布局或原生表单验收。人工步骤和真实模块接通后的边界见[持续任务说明](../docs/persistent-missions.md#离线验收与人工检查)。测试数量以实际收集为准，不在文档中固定。
 
 ## 共用支持代码
 

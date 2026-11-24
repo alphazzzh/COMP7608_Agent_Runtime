@@ -47,3 +47,5 @@ class VerificationReceipt:
     input_fingerprint: str
     result: m.Verification
     call_id: str
+    evidence_ids: tuple[str, ...] | None = None
+    covers_all: bool | None = None
