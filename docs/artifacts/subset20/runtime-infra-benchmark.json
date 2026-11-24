@@ -1,0 +1,63 @@
+{
+  "parallel_scheduling": {
+    "steps_count": 4,
+    "simulated_io_ms_per_step": 80,
+    "serial": {
+      "status": "completed",
+      "elapsed_ms": 612.4,
+      "max_concurrent_observed": 1,
+      "deterministic_evidence_order": true
+    },
+    "parallel_safe": {
+      "status": "completed",
+      "elapsed_ms": 108.4,
+      "max_concurrent_observed": 4,
+      "deterministic_evidence_order": true
+    },
+    "exclusive_mutex": {
+      "status": "completed",
+      "elapsed_ms": 356.3,
+      "max_concurrent_observed": 1,
+      "deterministic_evidence_order": true
+    },
+    "parallel_speedup": 5.65
+  },
+  "durable_recovery": {
+    "clean_crash_recovery": {
+      "initial_catalog_calls": 1,
+      "initial_tool_calls": 1,
+      "resumed_status": "completed",
+      "resumed_new_catalog_calls": 0,
+      "resumed_new_tool_calls": 0,
+      "evidence_preserved": false,
+      "resume_ms": 4.4
+    },
+    "inflight_unknown_fail_closed": {
+      "fail_closed_triggered": true,
+      "error_code": "recovery_outcome_unknown",
+      "resumed_new_tool_calls": 0
+    }
+  },
+  "persistent_missions": {
+    "cycles_completed": 3,
+    "max_runs_limit": 3,
+    "mission_status_at_limit": "completed",
+    "fourth_cycle_rejected_code": "mission_closed",
+    "budget_overruns": 0,
+    "used_runs": 3,
+    "used_model_calls": 6,
+    "used_data_calls": 3,
+    "continuation_bytes_max": 254,
+    "continuation_limit_bytes": 4096,
+    "oversized_continuation_rejected": true
+  },
+  "sql_sandbox": {
+    "adversarial_total": 8,
+    "adversarial_blocked": 8,
+    "adversarial_block_rate_pct": 100.0,
+    "avg_rejection_latency_ms": 1.201,
+    "legitimate_total": 3,
+    "legitimate_allowed": 3,
+    "oversized_file_guard_code": "source_too_large"
+  }
+}

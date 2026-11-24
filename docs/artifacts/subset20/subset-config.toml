@@ -1,0 +1,33 @@
+[llm]
+base_url = "https://api.deepseek.com"
+model_id = "deepseek-flash"
+api_key_env = "LAKEQA_LOCAL_API_KEY"
+model_params = {temperature = 0}
+
+[profile]
+profile_id = "lakeqa-mini-subset20"
+title = "LakeQA mini 20-task controlled subset (<=16 MiB)"
+dataset_id = "lakeqa-mini"
+dataset_name = "LakeQA mini evaluation corpus"
+revision = "lakeqa-mini-subset20-2026-11-21"
+
+[adapters.data]
+factory = "lake_agent.adapters.data_adapter:create_port"
+options = {base_dir = "/Users/zzh/workspace/COMP7608 Large language models/project/runtime/runs/lakeqa-eval-corpus/data"}
+
+[adapters.content]
+factory = "lake_agent.adapters.content_adapter:create_port"
+options = {}
+
+[run]
+per_call_timeout_ms = 60000
+max_wall_time_ms = 240000
+max_model_calls = 12
+max_data_calls = 20
+max_plan_steps = 12
+catalog_page_size = 256
+candidate_top_k = 5
+planner_catalog_preview_bytes = 1500
+planner_catalog_max_sources = 10
+deduplicate_searches = true
+max_consecutive_searches = 3

@@ -8,6 +8,7 @@
 /docs/*
 !/docs/LakeQA-实验结果.md
 !/docs/figures/
+!/docs/artifacts/
 
 # 本地环境、生成的运行状态与构建输出。
 .venv/

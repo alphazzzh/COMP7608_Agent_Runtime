@@ -1,0 +1,24 @@
+{
+  "origin": "https://lakeqa-yc4103-datalake.s3.us-east-1.amazonaws.com/",
+  "tasks": 135,
+  "task_declared_objects": 906,
+  "adapter_supported_objects": 898,
+  "downloaded": 898,
+  "downloaded_bytes": 14294547406,
+  "gold_objects": 478,
+  "downloaded_gold_objects": 478,
+  "ranged_recoveries": 6,
+  "inventory_sha256": "35a3541267c6b77e54bae701f3468b633539ae7af7804f2896fa98fa589d2f42",
+  "skipped_unsupported": [
+    "datagov/2006-2007-school-progress-report/files/2006-07_School_Progress_Report.xlsx",
+    "datagov/2007-2008-school-progress-report/files/School_Progress_Reports_-_All_Schools.xlsx",
+    "datagov/2008-2009-school-progress-report/files/School_Progress_Reports_-_All_Schools.xlsx",
+    "datagov/2009-2010-school-progress-report/files/School_Progress_Reports_-_All_Schools_2009-10.xlsx",
+    "datagov/2010-2011-school-progress-report/files/School_Progress_Report_2010-2011.xlsx",
+    "datagov/2010-2011-vadir-incidents/files/vadir-glossary.html",
+    "datagov/eaarl-topography-george-washington-birthplace-national-monument/files/of2007-1179metadata.html",
+    "datagov/income-limits-by-county/files/income-limits-data-dictionary.docx"
+  ],
+  "missing_supported": [],
+  "missing_gold": []
+}

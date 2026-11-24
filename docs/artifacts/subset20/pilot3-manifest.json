@@ -1,0 +1,60 @@
+[
+  {
+    "task_id": "EQA000003",
+    "question": "For each year from 2005 through 2010, define Bonus Volatility-Adjusted Level (BVAL) as the draws' average New York Lotto bonus ball number plus half of the standard deviation of bonus ball numbers. Which year has the highest BVAL? If there is a tie, choose the earlier year. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "2007"
+    ],
+    "relevant_source_ids": [
+      "datagov/lottery-ny-lotto-winning-numbers-beginning-2001/files/rows.txt"
+    ],
+    "numeric_answer": "2007",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000230",
+    "question": "I'm exploring quirky roadside attractions in Montana. What iconic statue is located in the county seat of a Montana county that had 210-225 veteran disability recipients in 2019 and 220-235 recipients after 4 years? Please answer the name of the statue. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "the Cut Bank Penguin"
+    ],
+    "relevant_source_ids": [
+      "datagov/fy-2019-disability-pension-recipient-by-county/files/rows.txt",
+      "datagov/fy-2023-disability-compensation-recipients-by-county/files/rows.txt",
+      "wikipedia/Cut_Bank,_Montana/content.txt",
+      "wikipedia/Glacier_County,_Montana/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000229",
+    "question": "I'm interested in extreme weather records across Wyoming. What is the record high temperature ever recorded in the county seat of the Wyoming county that had between 150-180 veteran disability recipients in 2019 and 260-280 recipients in 2023? Answer the integer in Fahrenheit. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "115"
+    ],
+    "relevant_source_ids": [
+      "datagov/fy-2019-disability-pension-recipient-by-county/files/rows.txt",
+      "datagov/fy-2023-disability-compensation-recipients-by-county/files/rows.txt",
+      "wikipedia/Basin,_Wyoming/content.txt",
+      "wikipedia/Big_Horn_County,_Wyoming/content.txt"
+    ],
+    "numeric_answer": "115",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  }
+]

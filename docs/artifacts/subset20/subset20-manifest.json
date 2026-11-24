@@ -1,0 +1,461 @@
+[
+  {
+    "task_id": "EQA000003",
+    "question": "For each year from 2005 through 2010, define Bonus Volatility-Adjusted Level (BVAL) as the draws' average New York Lotto bonus ball number plus half of the standard deviation of bonus ball numbers. Which year has the highest BVAL? If there is a tie, choose the earlier year. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "2007"
+    ],
+    "relevant_source_ids": [
+      "datagov/lottery-ny-lotto-winning-numbers-beginning-2001/files/rows.txt"
+    ],
+    "numeric_answer": "2007",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000229",
+    "question": "I'm interested in extreme weather records across Wyoming. What is the record high temperature ever recorded in the county seat of the Wyoming county that had between 150-180 veteran disability recipients in 2019 and 260-280 recipients in 2023? Answer the integer in Fahrenheit. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "115"
+    ],
+    "relevant_source_ids": [
+      "datagov/fy-2019-disability-pension-recipient-by-county/files/rows.txt",
+      "datagov/fy-2023-disability-compensation-recipients-by-county/files/rows.txt",
+      "wikipedia/Basin,_Wyoming/content.txt",
+      "wikipedia/Big_Horn_County,_Wyoming/content.txt"
+    ],
+    "numeric_answer": "115",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000230",
+    "question": "I'm exploring quirky roadside attractions in Montana. What iconic statue is located in the county seat of a Montana county that had 210-225 veteran disability recipients in 2019 and 220-235 recipients after 4 years? Please answer the name of the statue. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "the Cut Bank Penguin"
+    ],
+    "relevant_source_ids": [
+      "datagov/fy-2019-disability-pension-recipient-by-county/files/rows.txt",
+      "datagov/fy-2023-disability-compensation-recipients-by-county/files/rows.txt",
+      "wikipedia/Cut_Bank,_Montana/content.txt",
+      "wikipedia/Glacier_County,_Montana/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000235",
+    "question": "Can you find the NYC high school in district 10 that are in top 6 by high school's overall score from school year 2006-07 to school year 2007-08, and has the lowest average additional credits. Then, find the first Turing award receiver in this high school and report which University this person obtained his PhD from. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Princeton University"
+    ],
+    "relevant_source_ids": [
+      "datagov/2006-2007-school-progress-report/files/rows.txt",
+      "datagov/2007-2008-school-progress-report/files/rows.txt",
+      "wikipedia/List_of_Bronx_High_School_of_Science_alumni/content.txt",
+      "wikipedia/Marvin_Minsky/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000301",
+    "question": "For the NYC high school that ranked in the top 7 by overall score in all three school years: 2006-07 and 2009-11, find the neighborhood named after this high school. Finally report the New York village where the builder of the earliest constructed bridge that connects this neighborhood with the mainland is buried. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Sleepy Hollow"
+    ],
+    "relevant_source_ids": [
+      "datagov/2006-2007-school-progress-report/files/rows.txt",
+      "datagov/2009-2010-school-progress-report/files/rows.txt",
+      "datagov/2010-2011-school-progress-report/files/rows.txt",
+      "wikipedia/Frederick_Philipse/content.txt",
+      "wikipedia/Marble_Hill,_Manhattan/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000313",
+    "question": "For the NYC high school that ranked in the top 7 by overall score in all three school years: 2006-07 and 2009-11, find the neighborhood named after this high school. Then identify the builder of the earliest constructed bridge that connects this neighborhood with the mainland. What was the name of that builder's second wife? Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Catharine Van Cortlandt Derval"
+    ],
+    "relevant_source_ids": [
+      "datagov/2006-2007-school-progress-report/files/rows.txt",
+      "datagov/2009-2010-school-progress-report/files/rows.txt",
+      "datagov/2010-2011-school-progress-report/files/rows.txt",
+      "wikipedia/Frederick_Philipse/content.txt",
+      "wikipedia/Marble_Hill,_Manhattan/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000378",
+    "question": "Can you tell me which senior high school had a consistently top 3 number of violent/disruptive incident reported between 2010 and 2014? The borough containing that school also has a suspension bridge that connects to NYC, what is the name of that suspension bridge?. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Verrazzano-Narrows Bridge"
+    ],
+    "relevant_source_ids": [
+      "datagov/2010-2011-vadir-incidents/files/rows.txt",
+      "datagov/2011-2012-vadir-incidents/files/rows.txt",
+      "datagov/2012-2013-vadir-incidents/files/rows.txt",
+      "datagov/2013-2014-vadir-incidents/files/rows.txt",
+      "wikipedia/Bronx–Whitestone_Bridge/content.txt",
+      "wikipedia/Brooklyn_Bridge/content.txt",
+      "wikipedia/George_Washington_Bridge/content.txt",
+      "wikipedia/Manhattan_Bridge/content.txt",
+      "wikipedia/Robert_F._Kennedy_Bridge/content.txt",
+      "wikipedia/Staten_Island/content.txt",
+      "wikipedia/Susan_E._Wagner_High_School/content.txt",
+      "wikipedia/Throgs_Neck_Bridge/content.txt",
+      "wikipedia/Verrazzano–Narrows_Bridge/content.txt",
+      "wikipedia/Williamsburg_Bridge/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000481",
+    "question": "In 2015, which New York county named after a king had a population over 900,000, a firearm rate under 35 per 100,000, total state payments for homeowners' school taxes over $100 million, a total jail population under 1,200, and more than 20 total hate crime incidents? Please report the king's birth year. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "1650"
+    ],
+    "relevant_source_ids": [
+      "datagov/hate-crimes-by-county-and-bias-type-beginning-2010/files/rows.txt",
+      "datagov/index-violent-property-and-firearm-rates-by-county-beginning-1990/files/rows.txt",
+      "datagov/jail-population-by-county-beginning-1997/files/rows.txt",
+      "datagov/nys-school-tax-relief-star-reimbursement-by-county-beginning-levy-year-1998/files/rows.txt",
+      "wikipedia/Nassau_County,_New_York/content.txt",
+      "wikipedia/William_III_of_England/content.txt"
+    ],
+    "numeric_answer": "1650",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000482",
+    "question": "Among New York counties with violent crime rates over 300 per 100,000 in 2020 and more than 100 youth sent to jail in 2015, find the county that also had total state payments for homeowners' school taxes between $60M and $90M in 2023 and a jail population above 800. Find the county seat of that county, what year was it incorporated? Please return the year only. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "1832"
+    ],
+    "relevant_source_ids": [
+      "datagov/annual-youth-detention-admissions-by-county-beginning-2006/files/rows.txt",
+      "datagov/index-violent-property-and-firearm-rates-by-county-beginning-1990/files/rows.txt",
+      "datagov/jail-population-by-county-beginning-1997/files/rows.txt",
+      "datagov/nys-school-tax-relief-star-reimbursement-by-county-beginning-levy-year-1998/files/rows.txt",
+      "wikipedia/Buffalo,_New_York/content.txt",
+      "wikipedia/Erie_County,_New_York/content.txt"
+    ],
+    "numeric_answer": "1832",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000493",
+    "question": "Identify the first civilian superintendent of the Chicago Police Department. In the city where that person previously served as police chief and founded a criminal justice program at a local university, find the county the city is located in and report the absolute change in the number of veterans receiving disability benefits between 2020 and 2023. Only report the numeric change as a whole number. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "830"
+    ],
+    "relevant_source_ids": [
+      "datagov/fy-2020-disability-compensation-recipients-by-county/files/rows.txt",
+      "datagov/fy-2023-disability-compensation-recipients-by-county/files/rows.txt",
+      "wikipedia/Chicago_Police_Department/content.txt",
+      "wikipedia/O._W._Wilson/content.txt",
+      "wikipedia/Wichita,_Kansas/content.txt",
+      "wikipedia/Wichita_Police_Department/content.txt"
+    ],
+    "numeric_answer": "830",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000549",
+    "question": "In which Virginia county is the NASA facility where the equipment used to collect the bare earth elevation data for the 2007 USGS survey of the national monument honoring a U.S. president born in Virginia who also held a general officer rank and appears on current U.S. currency was developed? Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Accomack County"
+    ],
+    "relevant_source_ids": [
+      "datagov/eaarl-topography-george-washington-birthplace-national-monument/files/USGS.cc604b53-f943-4516-a7a2-7d6e3d12beef.txt",
+      "wikipedia/George_Washington_Birthplace_National_Monument/content.txt",
+      "wikipedia/List_of_presidents_of_the_United_States_by_home_state/content.txt",
+      "wikipedia/List_of_presidents_of_the_United_States_by_military_rank/content.txt",
+      "wikipedia/United_States_dollar/content.txt",
+      "wikipedia/Wallops_Island/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000562",
+    "question": "Among Washington, DC wards 2 and 5, identify which ward had more scheduled street-cleaning events from 2022 to 2024. In that ward, find the charter school whose serving spans grades 8 and 9, and is named after a famous person. What county is that person's birthplace located in? Please return the county only, i.e. `XX County`. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Ulster County"
+    ],
+    "relevant_source_ids": [
+      "datagov/dc-charter-schools/files/data.txt",
+      "datagov/street-sweeping-schedule-2022/files/rows.txt",
+      "datagov/street-sweeping-schedule-2023/files/rows.txt",
+      "datagov/street-sweeping-schedule-2024/files/rows.txt",
+      "wikipedia/Rifton,_New_York/content.txt",
+      "wikipedia/Sojourner_Truth/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000656",
+    "question": "Can you find the NYC elementary schools that appear in the top 5 by the schools' learning environment in at least three years from 2006-2010 and is located in Bedford? Please report the school day in the MM/DD format. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "10/28"
+    ],
+    "relevant_source_ids": [
+      "datagov/2006-2007-school-progress-report/files/rows.txt",
+      "datagov/2007-2008-school-progress-report/files/rows.txt",
+      "datagov/2008-2009-school-progress-report/files/rows.txt",
+      "datagov/2009-2010-school-progress-report/files/rows.txt",
+      "datagov/2013-2014-school-locations/files/rows.txt",
+      "wikipedia/John_Wayne_Elementary_School/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000758",
+    "question": "Find the Texas counties that appear in both of these groups: (1) counties with at least 10% of residents ages 18 to 64 living with disabilities and at least 23% of residents age 65 or older in 2023, and (2) counties in the Abilene adult-protection region with 150 or more completed adult-protection investigations in 2023. Of those counties, pick the one with the fewest completed investigations into possible child abuse or neglect in 2023. A leader of that county's Regulators died in that county's seat. What is the county seat of the county where this leader was born? Please return the county seat name only. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "Dadeville"
+    ],
+    "relevant_source_ids": [
+      "datagov/aps-1-1-texas-adult-populations-at-risk-by-county-region-fy2013-fy2022/files/rows.txt",
+      "datagov/aps-3-1-investigations-activity-by-county-fy2013-fy2022/files/rows.txt",
+      "datagov/cpi-3-1-completed-abuse-neglect-investigations-by-county-fy2013-fy2022/files/rows.txt",
+      "datagov/cpi-3-2-completed-investigations-initiated-timely-by-county-fy2013-fy2022/files/rows.txt",
+      "wikipedia/Doc_Scurlock/content.txt",
+      "wikipedia/Lincoln_County_Regulators/content.txt",
+      "wikipedia/Tallapoosa_County,_Alabama/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000759",
+    "question": "Find the NYC high school that received an overall A rating in 2010-11 and 2011-12, was also given an A for student graduation and diploma outcomes in 2010-11, and later had the percentage of students considered prepared for college or careers between 98-99% in both 2012 and 2013, with a 2013 graduation rate below 100%. Find the person after whom that school is named, identify the university where he studied, and tell me in what year that university was founded. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "1585"
+    ],
+    "relevant_source_ids": [
+      "datagov/2011-2012-high-school-progress-report/files/rows.txt",
+      "datagov/2013-2014-doe-high-school-performance-directory/files/rows.txt",
+      "datagov/2014-2015-doe-high-school-performance-directory/files/rows.txt",
+      "wikipedia/Peter_Stuyvesant/content.txt",
+      "wikipedia/Stuyvesant_High_School/content.txt",
+      "wikipedia/University_of_Franeker/content.txt"
+    ],
+    "numeric_answer": "1585",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000764",
+    "question": "The NBA champion team based in San Antonio won its first NBA Finals against another team. Find the county that `another` team is based in. In 2020, what is the absolute difference between firearm crimes and hate crime incidents reported in that county? Only report the number in your answer. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "816"
+    ],
+    "relevant_source_ids": [
+      "datagov/hate-crimes-by-county-and-bias-type-beginning-2010/files/rows.txt",
+      "datagov/index-violent-property-and-firearm-rates-by-county-beginning-1990/files/rows.txt",
+      "wikipedia/Manhattan/content.txt",
+      "wikipedia/New_York_Knicks/content.txt",
+      "wikipedia/San_Antonio/content.txt",
+      "wikipedia/San_Antonio_Spurs/content.txt"
+    ],
+    "numeric_answer": "816",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000771",
+    "question": "Gary, Indiana was founded by a corporation created by J. P. Morgan when he merged Federal Steel and National Steel with another company. Who founded that company, where was he based, and what was the average Police Bureau expenditure in that city in 2017 and 2018? Please return only the average expenditure rounded to the nearest integer. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "99357947"
+    ],
+    "relevant_source_ids": [
+      "datagov/2011-2023-city-of-pittsburgh-operating-budget/files/2017-operating.txt",
+      "datagov/2011-2023-city-of-pittsburgh-operating-budget/files/2018-operating.txt",
+      "wikipedia/Andrew_Carnegie/content.txt",
+      "wikipedia/Carnegie_Steel_Company/content.txt",
+      "wikipedia/Gary,_Indiana/content.txt",
+      "wikipedia/U.S._Steel/content.txt"
+    ],
+    "numeric_answer": "99357947",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000774",
+    "question": "Identify a specific California county based on a set of health and housing statistics. The county had an Area Median Income of at least $142,800 in 2022 and $147,900 in 2023. It also had an infants, children and woman average cost per family of $570 or more in 2018 and $700 or more in 2020, a 2015 perioperative hemorrhage/hematoma observed rate of 19 or higher, and a geographical shape area of at least 3 billion square meters. Once you identify the county that matches all these figures, determine its county seat and state which bay is on the southern shore of that county seat. Only report the bay. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "San Francisco Bay"
+    ],
+    "relevant_source_ids": [
+      "datagov/california-county-boundaries-bd0f6/files/California_County_Boundaries_9101614255844818638.txt",
+      "datagov/california-women-infants-and-children-program-redemption-by-county-967e9/files/2010-2018-part-a-wic-redemptions-by-vendor-county-with-family-counts.txt",
+      "datagov/california-women-infants-and-children-program-redemption-by-county-967e9/files/2019-2020-part-b-wic-redemptions-by-vendor-county-with-family-counts.txt",
+      "datagov/hospitalization-counts-and-rates-of-selected-adverse-hospital-events-by-california-county-67a4a/files/ca-oshpd-adveventhospitalizationspsi-county2005-2015q3.txt",
+      "datagov/income-limits-by-county/files/2022-income-limits.txt",
+      "datagov/income-limits-by-county/files/2023-income-limits.txt",
+      "wikipedia/San_Jose,_California/content.txt",
+      "wikipedia/Santa_Clara_County,_California/content.txt"
+    ],
+    "numeric_answer": null,
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "numerical_accuracy",
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000812",
+    "question": "Identify the Chicago library branch that ranked in the top five for total number of items checked out over the year and total visitors, and in the top three for total public-computer logins, every year from 2019 to 2021. What community area number corresponds to the neighborhood where this branch is located? Return the number only. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "4"
+    ],
+    "relevant_source_ids": [
+      "datagov/libraries-2019-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2019-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2019-visitors-by-location/files/rows.txt",
+      "datagov/libraries-2020-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2020-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2020-visitors-by-location/files/rows.txt",
+      "datagov/libraries-2021-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2021-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2021-visitors-by-location/files/rows.txt",
+      "datagov/public-health-statistics-life-expectancy-by-community-area/files/rows.txt",
+      "wikipedia/Conrad_Sulzer_Regional_Library/content.txt"
+    ],
+    "numeric_answer": "4",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  },
+  {
+    "task_id": "EQA000971",
+    "question": "Identify the Chicago library branch that ranked in the top five for circulation and visitors, and top three for computer sessions, every year from 2019 to 2021. What is the per capita income of the community area where this library is located? Please return the number only. Your response should be in the format [Answer].",
+    "expected_answers": [
+      "35503"
+    ],
+    "relevant_source_ids": [
+      "datagov/libraries-2019-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2019-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2019-visitors-by-location/files/rows.txt",
+      "datagov/libraries-2020-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2020-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2020-visitors-by-location/files/rows.txt",
+      "datagov/libraries-2021-circulation-by-location/files/rows.txt",
+      "datagov/libraries-2021-computer-sessions-by-location/files/rows.txt",
+      "datagov/libraries-2021-visitors-by-location/files/rows.txt",
+      "datagov/public-health-statistics-life-expectancy-by-community-area/files/rows.txt",
+      "datagov/public-health-statistics-selected-public-health-indicators-by-chicago-community-area/files/rows.txt",
+      "wikipedia/Conrad_Sulzer_Regional_Library/content.txt"
+    ],
+    "numeric_answer": "35503",
+    "numeric_tolerance": 0.0,
+    "structured_answer_json": null,
+    "not_applicable_metrics": [
+      "structured_accuracy"
+    ],
+    "hop_count": null
+  }
+]
